@@ -1,16 +1,54 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, reactive, ref } from 'vue'
+import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import CameraScene from './components/CameraScene.vue'
-import { decode, fields, hex, hexBytes, makePacket, parseHex, PelcoDStream, type Packet, type StreamEvent, type Issue } from './protocol/pelcoD'
-import { applyPacket, cameraRates, createCamera, defaultProfile, stepCamera, stopCamera, zoomSpeedFactor } from './simulation/camera'
+import MonitorSwitchers from './components/MonitorSwitchers.vue'
+import SharedBusPanel from './components/SharedBusPanel.vue'
+import SimulatorOverview from './components/SimulatorOverview.vue'
+import { fields, hex, hexBytes, makePacket, parseHex } from './protocol/pelcoD'
+import { cameraRates, createCamera, defaultProfile, stepCamera, stopCamera, zoomSpeedFactor } from './simulation/camera'
 import { findPalette, paletteGradient, thermalPalettes } from './simulation/thermalPalettes'
+import { dispatchPacket, SharedSerialBus, type BusStreamEvent } from './simulation/serialBus'
+import { loadSwitchers, switcherStorageKey, type Switcher } from './simulation/switcher'
 
-interface Entry { id: number; time: string; source: string; bytes: number[]; issues: Issue[]; packet?: Packet; description: string; result: string }
+import { cameraStorageKey, loadCameras, maxCameras, normalizeCameraConfig, type CameraConfig } from './simulation/cameras'
+import type { CaptureEntry as Entry } from './simulation/history'
 interface Port { path: string; manufacturer?: string }
-const camera = reactive(createCamera())
+const cameras = ref(loadCameras())
+const selectedCameraId = ref(cameras.value[0].id)
+const selectedCamera = computed(() => cameras.value.find(item => item.id === selectedCameraId.value) ?? cameras.value[0])
+const camera = computed(() => selectedCamera.value.state)
 const profile = reactive({ ...defaultProfile })
 const turboByte = ref(0xff)
-const address = ref(1)
+const address = computed({ get: () => selectedCamera.value.address, set: value => { selectedCamera.value.address = value } })
+const activeSimulator = ref('overview')
+const switchers = ref(loadSwitchers())
+const storageError = ref('')
+const cameraStorageError = ref('')
+const cameraBaudRate = computed({ get: () => selectedCamera.value.baudRate, set: value => { selectedCamera.value.baudRate = value } }); const busBaudRate = ref(9600)
+const busSettings = computed(() => ({ cameraAddress: address.value, cameraBaudRate: cameraBaudRate.value, baudRate: busBaudRate.value, turboByte: turboByte.value, cameras: cameras.value }))
+watch(switchers, devices => {
+  try { localStorage.setItem(switcherStorageKey, JSON.stringify(devices)); storageError.value = '' }
+  catch { storageError.value = 'Browser storage is unavailable. Switchers work for this session but cannot be saved.' }
+}, { deep: true })
+watch(() => cameras.value.map(({ state, ...config }) => config), configs => {
+  try { localStorage.setItem(cameraStorageKey, JSON.stringify(configs)); cameraStorageError.value = '' }
+  catch { cameraStorageError.value = 'Camera configuration cannot be saved in this browser.' }
+}, { deep: true })
+function selectCamera(id: string, openControls = false) {
+  endHold()
+  selectedCameraId.value = id
+  if (openControls) activeSimulator.value = 'camera'
+}
+function updateCameras(configs: CameraConfig[]) {
+  const valid = configs.slice(0, maxCameras).map(normalizeCameraConfig).filter((item): item is CameraConfig => Boolean(item))
+  if (!valid.length || new Set(valid.map(item => item.id)).size !== valid.length) return
+  endHold()
+  cameras.value = valid.map(config => {
+    const previous = cameras.value.find(item => item.id === config.id)
+    return { ...config, state: previous?.address === config.address ? previous.state : createCamera() }
+  })
+  if (!cameras.value.some(item => item.id === selectedCameraId.value)) selectedCameraId.value = cameras.value[0].id
+}
 const tab = ref('hex')
 const input = ref('FF 01 00 02 20 00 23')
 const inputError = ref('')
@@ -21,39 +59,38 @@ const totalBytes = ref(0); const totalFrames = ref(0); const totalRejected = ref
 const showFrustum = ref(true)
 const scene = ref<InstanceType<typeof CameraScene>>()
 const ports = ref<Port[]>([])
-const serialPath = ref(''); const baudRate = ref(2400)
+const serialPath = ref(''); const baudRate = ref(9600)
 const serialConnected = ref(false); const connectedPath = ref('')
 const bridgeConnected = ref(false); const connectionError = ref(''); const busy = ref(false)
-const manualStream = new PelcoDStream()
-const serialStream = new PelcoDStream()
-const apiStream = new PelcoDStream()
+const bus = new SharedSerialBus()
 const pending = ref<number[]>([])
 let socket: WebSocket | undefined; let reconnect: ReturnType<typeof setTimeout> | undefined
 let interval: ReturnType<typeof setInterval> | undefined; let frame = 0; let sequence = 0; let disposed = false
 let held: string | null = null; let repeat: ReturnType<typeof setInterval> | undefined
 const panSpeed = ref(32); const tiltSpeed = ref(24); const preset = ref(1)
 const visibleEntries = computed(() => entries.value.filter(entry => filter.value === 'all' || entry.issues.some(issue => issue.severity !== 'info')))
-const displayPan = computed(() => ((camera.pan - camera.zeroPan) % 360 + 360) % 360)
-const rates = computed(() => cameraRates(camera, profile))
-const moving = computed(() => camera.target ? 'Moving to preset' : camera.scanning ? 'Auto scan' : [camera.motion.pan ? `Pan ${camera.motion.pan > 0 ? 'right' : 'left'}` : '', camera.motion.tilt ? `Tilt ${camera.motion.tilt > 0 ? 'up' : 'down'}` : '', camera.motion.zoom ? `Zoom ${camera.motion.zoom > 0 ? 'tele' : 'wide'}` : '', camera.motion.focus ? 'Focus' : '', camera.motion.iris ? 'Iris' : ''].filter(Boolean).join(' · ') || 'Stationary')
-const fieldNotes = ['Always FF', 'Camera address', 'Power / lens flags', 'Motion / opcode', 'Pan speed / data', 'Tilt speed / data', 'Sum bytes 2–6']
-function addEntry(event: StreamEvent, source: string) {
-  const packet = event.issue ? undefined : decode(event.bytes, address.value, turboByte.value)
-  const result = packet ? applyPacket(camera, packet) : 'Rejected'
-  const entry: Entry = { id: ++sequence, time: new Date().toLocaleTimeString('en-GB', { hour12: false }) + '.' + String(Date.now() % 1000).padStart(3, '0'), source, bytes: event.bytes, issues: packet?.issues ?? [event.issue!], packet, description: packet?.description ?? 'Framing error', result }
+const displayPan = computed(() => ((camera.value.pan - camera.value.zeroPan) % 360 + 360) % 360)
+const rates = computed(() => cameraRates(camera.value, profile))
+const moving = computed(() => camera.value.target ? 'Moving to preset' : camera.value.scanning ? 'Auto scan' : [camera.value.motion.pan ? `Pan ${camera.value.motion.pan > 0 ? 'right' : 'left'}` : '', camera.value.motion.tilt ? `Tilt ${camera.value.motion.tilt > 0 ? 'up' : 'down'}` : '', camera.value.motion.zoom ? `Zoom ${camera.value.motion.zoom > 0 ? 'tele' : 'wide'}` : '', camera.value.motion.focus ? 'Focus' : '', camera.value.motion.iris ? 'Iris' : ''].filter(Boolean).join(' · ') || 'Stationary')
+const fieldNotes = computed(() => ['Always FF', 'Device address', 'Power / lens flags', 'Motion / opcode', selected.value?.packet?.command?.type === 'route' ? 'Switch output number' : 'Pan speed / data', selected.value?.packet?.command?.type === 'route' ? 'Switch input number' : 'Tilt speed / data', 'Sum bytes 2–6'])
+function entryTone(entry: Entry) { return entry.issues.some(issue => issue.severity === 'error') ? 'error' : entry.issues.some(issue => issue.severity === 'warning') ? 'warning' : ['Ignored', 'No device', 'No preset'].includes(entry.result) ? 'neutral' : 'success' }
+function addEntry(event: BusStreamEvent) {
+  const dispatched = event.issue ? undefined : dispatchPacket(event.bytes, cameras.value, switchers.value, busSettings.value)
+  const packet = dispatched?.packet
+  const result = dispatched?.result ?? (event.issue?.severity === 'warning' ? 'Bus warning' : 'Rejected')
+  const entry: Entry = { id: ++sequence, time: new Date().toLocaleTimeString('en-GB', { hour12: false }) + '.' + String(Date.now() % 1000).padStart(3, '0'), source: event.source, bytes: event.bytes, issues: packet?.issues ?? [event.issue!], packet, description: packet?.description ?? (event.issue?.severity === 'warning' ? 'Interleaving detected' : 'Framing error'), result, deliveries: dispatched?.deliveries ?? [] }
   entries.value.unshift(entry); entries.value = entries.value.slice(0, 200)
   selected.value = entry
   if (packet) totalFrames.value++
-  if (result === 'Rejected') totalRejected.value++
+  if (result === 'Rejected' || entry.deliveries.some(item => item.result === 'Rejected')) totalRejected.value++
 }
-function receive(bytes: number[], source: string, stream: PelcoDStream, complete = false) {
+function receive(bytes: number[], source: string, complete = false) {
   totalBytes.value += bytes.length
-  stream.push(bytes).forEach(event => addEntry(event, source))
-  if (complete) stream.flush().forEach(event => addEntry(event, source))
-  pending.value = [...serialStream.pending, ...apiStream.pending]
+  bus.receive(bytes, source, complete).forEach(addEntry)
+  pending.value = bus.pending
 }
 function submit() {
-  try { inputError.value = ''; receive(parseHex(input.value), 'manual', manualStream, true) }
+  try { inputError.value = ''; receive(parseHex(input.value), 'manual', true) }
   catch (error) { inputError.value = error instanceof Error ? error.message : 'Invalid hex input.' }
 }
 function repairChecksum() {
@@ -70,16 +107,35 @@ function sample(name: string) {
 }
 function localCommand(cmd1 = 0, cmd2 = 0, data1 = 0, data2 = 0) {
   const bytes = makePacket(address.value, cmd1, cmd2, data1, data2)
-  receive(bytes, 'controls', manualStream, true)
+  receive(bytes, 'controls', true)
 }
-function selectThermalPalette() { localCommand(0, 7, 0, findPalette(camera.thermalPalette).preset) }
+function routeSwitcher(device: Switcher, output: number, input: number) { receive(makePacket(device.address, 0, 0x0d, output, input), 'switch-controls', true) }
+function injectFault(kind: string, switcherId: string) {
+  const device = switchers.value.find(item => item.id === switcherId && item.enabled)
+  if (!device) return
+  const start = sequence
+  const pan = makePacket(address.value, 0, 2, 32)
+  const route = makePacket(device.address, 0, 0x0d, 1, device.inputs.length > 1 ? 2 : 1)
+  const stop = makePacket(address.value)
+  if (kind === 'mixed') receive([...pan, ...route, ...stop], 'bus-example', true)
+  else if (kind === 'interleaved') {
+    receive(pan.slice(0, 3), 'camera-sender')
+    receive(route, 'switch-sender')
+    receive([...pan.slice(3), ...stop], 'camera-sender', true)
+  } else {
+    const corrupt = kind === 'checksum' ? [...route.slice(0, 6), route[6] ^ 0x01] : route.filter((_, i) => i !== 4)
+    receive([...corrupt, ...stop], 'fault-injector', true)
+  }
+  if (kind !== 'mixed') selected.value = entries.value.find(entry => entry.id > start && entry.issues.some(issue => issue.severity === 'error')) ?? selected.value
+}
+function selectThermalPalette() { localCommand(0, 7, 0, findPalette(camera.value.thermalPalette).preset) }
 function toggleLamp() {
   localCommand(0, 7, 0, 90)
-  localCommand(0, 7, 0, camera.lampOn ? 3 : 4)
+  localCommand(0, 7, 0, camera.value.lampOn ? 3 : 4)
 }
 function resetFeatures() {
-  camera.thermalEnabled = false; camera.thermalPalette = 'white-hot'; camera.thermalInverted = false
-  camera.lampOn = false; camera.lampArmedUntil = 0
+  camera.value.thermalEnabled = false; camera.value.thermalPalette = 'white-hot'; camera.value.thermalInverted = false
+  camera.value.lampOn = false; camera.value.lampArmedUntil = 0
 }
 function beginHold(direction: string, event: PointerEvent) {
   if (event.button !== 0 || held) return
@@ -92,19 +148,22 @@ function beginHold(direction: string, event: PointerEvent) {
   send(); repeat = setInterval(send, 150)
 }
 function endHold() { if (!held) return; clearInterval(repeat); held = null; localCommand() }
-function emergencyStop() { endHold(); localCommand(); stopCamera(camera) }
+function emergencyStop() {
+  endHold()
+  for (const target of new Set(cameras.value.map(item => item.address))) receive(makePacket(target), 'controls', true)
+  cameras.value.forEach(item => stopCamera(item.state))
+}
 function resetCamera() {
-  endHold(); stopCamera(camera)
-  camera.pan = 0; camera.tilt = 0; camera.zoom = 1; camera.focus = 0.5; camera.iris = 0.7; camera.power = true; camera.watchdogStopped = false; camera.zeroPan = 0; camera.autofocus = true
+  endHold(); stopCamera(camera.value)
+  camera.value.pan = 0; camera.value.tilt = 0; camera.value.zoom = 1; camera.value.focus = 0.5; camera.value.iris = 0.7; camera.value.power = true; camera.value.watchdogStopped = false; camera.value.zeroPan = 0; camera.value.autofocus = true
   resetFeatures()
   scene.value?.resetView()
 }
 function changeAddress() {
   address.value = Math.min(255, Math.max(1, Math.round(Number(address.value) || 1)))
-  endHold(); stopCamera(camera); camera.presets.clear()
+  endHold(); stopCamera(camera.value); camera.value.presets.clear()
   resetFeatures()
-  serialStream.flush('Address changed while receiving an incomplete packet.').forEach(event => addEntry(event, 'serial'))
-  apiStream.flush('Address changed while receiving an incomplete packet.').forEach(event => addEntry(event, 'api'))
+  bus.flush('Address changed while receiving an incomplete packet.').forEach(addEntry)
   pending.value = []
 }
 async function request(path: string, body?: object) {
@@ -130,25 +189,25 @@ function connectBridge() {
     const message = JSON.parse(event.data)
     if (message.type === 'status') {
       if (serialConnected.value && (!message.connected || message.path !== connectedPath.value)) {
-        serialStream.flush('Serial device disconnected during a packet.').forEach(event => addEntry(event, 'serial')); stopCamera(camera)
+        bus.flush('Serial device disconnected during a packet.').forEach(addEntry); cameras.value.forEach(item => stopCamera(item.state))
       }
       serialConnected.value = message.connected; connectedPath.value = message.path
-      pending.value = [...serialStream.pending, ...apiStream.pending]
-    } else if (message.type === 'bytes') receive(message.bytes, message.source, message.source === 'api' ? apiStream : serialStream)
+      if (message.connected) busBaudRate.value = message.baudRate
+      pending.value = bus.pending
+    } else if (message.type === 'bytes') receive(message.bytes, message.source)
     else if (message.type === 'error') connectionError.value = message.message
   }
   socket.onclose = () => {
     bridgeConnected.value = false; serialConnected.value = false
-    serialStream.flush('Bridge disconnected during a packet.').forEach(event => addEntry(event, 'serial'))
-    apiStream.flush('Bridge disconnected during a packet.').forEach(event => addEntry(event, 'api'))
-    pending.value = []; stopCamera(camera)
+    bus.flush('Bridge disconnected during a packet.').forEach(addEntry)
+    pending.value = []; cameras.value.forEach(item => stopCamera(item.state))
     if (!disposed) { connectionError.value = 'Serial bridge offline. Reconnecting…'; reconnect = setTimeout(connectBridge, 2000) }
   }
 }
 function exportLog() {
   const blob = new Blob([JSON.stringify(entries.value.slice().reverse(), null, 2)], { type: 'application/json' })
   const url = URL.createObjectURL(blob); const link = document.createElement('a')
-  link.href = url; link.download = 'pelco-d-capture.json'; link.click(); URL.revokeObjectURL(url)
+  link.href = url; link.download = 'iris-serial-capture.json'; link.click(); URL.revokeObjectURL(url)
 }
 function clearLog() { entries.value = []; selected.value = undefined; totalBytes.value = 0; totalFrames.value = 0; totalRejected.value = 0 }
 function onVisibility() { if (document.hidden) endHold() }
@@ -157,14 +216,13 @@ onMounted(() => {
   let previous = performance.now()
   const animate = (now: number) => {
     const elapsed = (now - previous) / 1000; previous = now
-    stepCamera(camera, profile, elapsed)
+    cameras.value.forEach(device => stepCamera(device.state, profile, elapsed))
     frame = requestAnimationFrame(animate)
   }
   frame = requestAnimationFrame(animate)
   interval = setInterval(() => {
-    serialStream.expire().forEach(event => addEntry(event, 'serial'))
-    apiStream.expire().forEach(event => addEntry(event, 'api'))
-    pending.value = [...serialStream.pending, ...apiStream.pending]
+    bus.expire().forEach(addEntry)
+    pending.value = bus.pending
   }, 100)
   window.addEventListener('blur', endHold); document.addEventListener('visibilitychange', onVisibility)
 })
@@ -178,16 +236,19 @@ onUnmounted(() => {
   <div class="app-shell">
     <header class="topbar">
       <a class="brand" href="/" aria-label="IRIS Simulators home"><span class="brand-mark"><i></i><i></i><i></i><i></i></span><strong>IRIS<span> / </span>SIMULATORS</strong></a>
-      <span class="workspace-label">PROTOCOL WORKBENCH</span>
-      <div class="header-status"><i class="status-dot" :class="{ offline: !bridgeConnected }"></i>{{ bridgeConnected ? 'Bridge online' : 'Bridge offline' }}<span class="version">v0.1</span></div>
+      <div class="simulator-tabs" role="tablist" aria-label="Simulator"><button id="overview-tab" :class="{ active: activeSimulator === 'overview' }" role="tab" :aria-selected="activeSimulator === 'overview'" aria-controls="overview-simulator" @click="activeSimulator = 'overview'"><span>▦</span> Overview</button><button id="camera-tab" :class="{ active: activeSimulator === 'camera' }" role="tab" :aria-selected="activeSimulator === 'camera'" aria-controls="camera-simulator" @click="activeSimulator = 'camera'"><span>◈</span> PTZ camera</button><button id="switcher-tab" :class="{ active: activeSimulator === 'switchers' }" role="tab" :aria-selected="activeSimulator === 'switchers'" aria-controls="switcher-simulator" @click="activeSimulator = 'switchers'"><span>⇄</span> Monitor switching <small>{{ switchers.length }}</small></button></div>
+      <div class="header-status" :aria-label="bridgeConnected ? 'Bridge online' : 'Bridge offline'"><i class="status-dot" :class="{ offline: !bridgeConnected }"></i><span class="bridge-label">{{ bridgeConnected ? 'Bridge online' : 'Bridge offline' }}</span><span class="version">v0.1</span></div>
     </header>
 
-    <main>
-      <div class="page-heading"><div><div class="eyebrow">CAMERA SYSTEMS <span>/</span> SERIAL PROTOCOLS</div><h1>Pelco-D <span>simulator</span><span class="protocol-badge">7-BYTE PROTOCOL</span></h1><p>See what your bytes do. Inspect every command. Understand every movement.</p></div><button class="button danger-outline" @click="emergencyStop"><span class="stop-square"></span> Stop motion</button></div>
+    <main :class="{ 'overview-main': activeSimulator === 'overview' }">
+      <div v-if="activeSimulator !== 'overview'" class="page-heading"><div><div class="eyebrow">IRIS SYSTEMS <span>/</span> SERIAL PROTOCOLS</div><h1>{{ activeSimulator === 'camera' ? 'Pelco-D' : 'Monitor switching' }} <span>simulator</span><span class="protocol-badge">SHARED SERIAL BUS</span></h1><p>Watch camera motion and monitor routes respond to the same command stream.</p></div><button class="button danger-outline" @click="emergencyStop"><span class="stop-square"></span> Stop all cameras</button></div>
 
+      <SimulatorOverview v-if="activeSimulator === 'overview'" id="overview-simulator" :cameras="cameras" :switchers="switchers" :entries="entries" :settings="busSettings" :pending="pending.length" :storage-error="cameraStorageError" @cameras="updateCameras" @controls="selectCamera($event, true)" @switchers="activeSimulator = 'switchers'" @stop="emergencyStop" />
+
+      <div v-show="activeSimulator !== 'overview'">
       <div class="workbench">
-        <section class="panel visualization-panel">
-          <div class="panel-heading"><h2><span class="small-icon">◈</span> Camera visualization</h2><div class="view-actions"><label><input v-model="showFrustum" type="checkbox" /> Field of view</label><button class="icon-button" @click="scene?.resetView()" aria-label="Reset orbit view" title="Reset orbit view">↻</button></div></div>
+        <section v-show="activeSimulator === 'camera'" id="camera-simulator" class="panel visualization-panel" role="tabpanel" aria-labelledby="camera-tab">
+          <div class="panel-heading"><h2><span class="small-icon">◈</span> Camera visualization</h2><select v-if="cameras.length > 1" class="camera-picker" :value="selectedCameraId" aria-label="Camera to control" @change="selectCamera(($event.target as HTMLSelectElement).value)"><option v-for="item in cameras" :key="item.id" :value="item.id">{{ item.name }} · {{ item.address }}</option></select><div class="view-actions"><label><input v-model="showFrustum" type="checkbox" /> Field of view</label><button class="icon-button" @click="scene?.resetView()" aria-label="Reset orbit view" title="Reset orbit view">↻</button></div></div>
           <CameraScene ref="scene" :camera="camera" :show-frustum="showFrustum" />
           <div class="telemetry">
             <div><span>PAN ANGLE</span><strong>{{ displayPan.toFixed(1) }}<small>°</small></strong><em>{{ rates.pan.toFixed(1) }}° / s</em></div>
@@ -210,6 +271,8 @@ onUnmounted(() => {
           </div>
           <div class="camera-effects-note">The camera view uses synthetic heat values. Selecting a palette opens thermal view.</div>
         </section>
+
+        <MonitorSwitchers v-show="activeSimulator === 'switchers'" id="switcher-simulator" role="tabpanel" aria-labelledby="switcher-tab" :switchers="switchers" :storage-error="storageError" @update="switchers = $event" @route="routeSwitcher" />
 
         <aside class="panel input-panel">
           <div class="panel-heading"><h2><span class="small-icon">⌁</span> Command source</h2><span class="rx-badge">RX</span></div>
@@ -234,7 +297,7 @@ onUnmounted(() => {
               <button class="button primary send-button" :disabled="busy || !bridgeConnected || (!serialConnected && !serialPath)" @click="toggleSerial">{{ busy ? 'Connecting…' : serialConnected ? 'Disconnect serial' : 'Connect serial' }} <span>⌁</span></button>
               <p v-if="serialConnected" class="connected-device"><i class="status-dot"></i> Receiving from {{ connectedPath }}</p>
               <p v-if="connectionError" class="error-message" role="alert">{{ connectionError }}</p>
-              <div class="serial-note">Connect a USB serial adapter, or enter a virtual serial port path to receive bytes from your controller. This bridge receives only; it sends no camera replies.</div>
+              <div class="serial-note">Connect a USB serial adapter, or enter a virtual serial port path to receive bytes from your controller. Camera and switcher traffic share one parser. The bridge receives only; it sends no device replies.</div>
               <details class="api-details"><summary>Send bytes from another app</summary><p>While this UI is open, POST binary bytes to <code>http://127.0.0.1:4311/api/bytes</code> with <code>Content-Type: application/octet-stream</code>, or JSON <code>{"hex":"FF 01 00 02 20 00 23"}</code>.</p></details>
             </template>
           </div>
@@ -242,11 +305,13 @@ onUnmounted(() => {
         </aside>
       </div>
 
+      <SharedBusPanel :settings="busSettings" :switchers="switchers" :deliveries="selected?.deliveries ?? []" :serial-connected="serialConnected" :pending="pending.length" :command="selected?.description ?? ''" @baud="busBaudRate = $event" @camera-baud="cameraBaudRate = $event" @fault="injectFault" />
+
       <section class="panel inspector-panel">
-        <div class="panel-heading"><h2><span class="small-icon">▤</span> Packet inspector</h2><div v-if="selected" class="packet-verdict" :class="selected.result === 'Rejected' ? 'error' : selected.issues.some(i => i.severity === 'warning') ? 'warning' : 'success'"><i class="status-dot"></i>{{ selected.result }}</div><span v-else class="muted small">Waiting for a command</span></div>
+        <div class="panel-heading"><h2><span class="small-icon">▤</span> Packet inspector</h2><div v-if="selected" class="packet-verdict" :class="entryTone(selected)"><i class="status-dot"></i>{{ selected.result }}</div><span v-else class="muted small">Waiting for a command</span></div>
         <div class="inspector-body">
           <div class="byte-grid"><div v-for="(field, index) in fields" :key="field" class="byte-cell" :class="{ 'byte-error': selected?.issues.some(i => i.severity === 'error' && i.bytes.includes(index)), 'byte-warning': selected?.issues.some(i => i.severity === 'warning' && i.bytes.includes(index)) }"><span class="byte-index">{{ String(index + 1).padStart(2, '0') }} <span>{{ field }}</span></span><strong>{{ selected?.bytes[index] === undefined ? '—' : hex(selected.bytes[index]) }}</strong><span class="binary">{{ selected?.bytes[index]?.toString(2).padStart(8, '0') ?? '········' }}</span><span class="byte-note">{{ fieldNotes[index] }}</span></div></div>
-          <div class="decoded-line"><span>DECODED</span><strong>{{ selected?.description ?? 'Send a command to inspect its bytes and see the camera respond.' }}</strong><span v-if="selected?.packet" class="expected-checksum">Expected checksum <code>{{ hex(selected.packet.checksum) }}</code></span></div>
+          <div class="decoded-line"><span>DECODED</span><strong>{{ selected?.description ?? 'Send a command to inspect its bytes and see each device respond.' }}</strong><span v-if="selected?.packet" class="expected-checksum">Expected checksum <code>{{ hex(selected.packet.checksum) }}</code></span></div>
           <div v-if="selected?.issues.length" class="issues-list"><div v-for="(issue, index) in selected.issues" :key="index" class="issue" :class="issue.severity"><span>{{ issue.severity === 'error' ? '×' : issue.severity === 'warning' ? '!' : 'i' }}</span><p>{{ issue.message }}</p></div></div>
           <div v-else-if="selected" class="valid-note"><span>✓</span> All bytes valid. {{ selected.bytes.length }}-byte frame verified.</div>
         </div>
@@ -254,12 +319,13 @@ onUnmounted(() => {
 
       <section class="panel capture-panel">
         <div class="panel-heading"><h2><span class="small-icon">≡</span> Command capture <span class="count-badge">{{ totalFrames }}</span></h2><div class="capture-actions"><div class="filter-switch"><button :class="{ active: filter === 'all' }" @click="filter = 'all'">All commands</button><button :class="{ active: filter === 'issues' }" @click="filter = 'issues'">Issues only</button></div><button class="text-button" :disabled="!entries.length" @click="exportLog">↓ Export</button><button class="text-button" @click="clearLog">Clear</button></div></div>
-        <div class="capture-table"><div class="capture-row table-head"><span>TIME</span><span>SOURCE</span><span>RAW BYTES</span><span>COMMAND</span><span>RESULT</span></div><button v-for="entry in visibleEntries" :key="entry.id" class="capture-row" :class="{ selected: selected?.id === entry.id }" @click="selected = entry"><span class="capture-time">{{ entry.time }}</span><span class="source-tag">{{ entry.source }}</span><code>{{ hexBytes(entry.bytes.slice(0, 30)) }}{{ entry.bytes.length > 30 ? ' …' : '' }}</code><span class="capture-description">{{ entry.description }}</span><span class="result-tag" :class="entry.result === 'Rejected' ? 'error' : entry.issues.some(i => i.severity === 'warning') ? 'warning' : entry.result === 'Other address' ? 'neutral' : 'success'">{{ entry.result }}</span></button><div v-if="!visibleEntries.length" class="capture-empty"><span>⌁</span><strong>{{ entries.length ? 'No issues in this capture' : 'Your command stream starts here' }}</strong><p>{{ entries.length ? 'Change the filter to see all received commands.' : 'Send hex bytes or connect a serial device. Every received command will appear here.' }}</p></div></div>
+        <div class="capture-table"><div class="capture-row table-head"><span>TIME</span><span>SOURCE</span><span>RAW BYTES</span><span>COMMAND</span><span>RESULT</span></div><button v-for="entry in visibleEntries" :key="entry.id" class="capture-row" :class="{ selected: selected?.id === entry.id }" @click="selected = entry"><span class="capture-time">{{ entry.time }}</span><span class="source-tag" :title="entry.source">{{ entry.source }}</span><code>{{ hexBytes(entry.bytes.slice(0, 30)) }}{{ entry.bytes.length > 30 ? ' …' : '' }}</code><span class="capture-description">{{ entry.description }}</span><span class="result-tag" :class="entryTone(entry)">{{ entry.result }}</span></button><div v-if="!visibleEntries.length" class="capture-empty"><span>⌁</span><strong>{{ entries.length ? 'No issues in this capture' : 'Your command stream starts here' }}</strong><p>{{ entries.length ? 'Change the filter to see all received commands.' : 'Send hex bytes or connect a serial device. Every received command will appear here.' }}</p></div></div>
         <div class="capture-footer"><span><i class="status-dot" :class="{ offline: !serialConnected }"></i>{{ serialConnected ? 'Listening on serial' : 'Manual input ready' }}<span v-if="pending.length"> · {{ pending.length }} byte(s) awaiting frame completion</span></span><div><span>{{ totalBytes }} bytes</span><span>{{ totalFrames }} frames</span><span :class="{ 'error-text': totalRejected > 0 }">{{ totalRejected }} rejected</span><span>Latest 200 entries</span></div></div>
       </section>
 
       <details class="panel settings-panel"><summary>Simulation settings <span>Protocol, speeds & presets</span></summary><div class="settings-content"><label>Protocol profile<select v-model.number="turboByte" @change="emergencyStop"><option :value="255">IRIS / legacy — FF turbo</option><option :value="64">Pelco v5.2.2 — 40 turbo</option></select></label><label>Control pan speed <span>{{ hex(panSpeed === 64 ? turboByte : panSpeed) }}</span><input v-model.number="panSpeed" type="range" min="0" max="64" /></label><label>Control tilt speed <span>{{ hex(tiltSpeed) }}</span><input v-model.number="tiltSpeed" type="range" min="0" max="63" /></label><label>Motion watchdog<select v-model.number="profile.watchdogMs"><option :value="15000">15 seconds</option><option :value="2000">2 seconds</option><option :value="0">Disabled — until stop command</option></select></label><div class="preset-settings"><label for="preset">Preset (1–32)</label><input id="preset" v-model.number="preset" type="number" min="1" max="32" @change="preset = Math.min(32, Math.max(1, Math.round(preset || 1)))" /><div><button class="button secondary" @click="localCommand(0, 3, 0, preset)">Save</button><button class="button secondary" @click="localCommand(0, 7, 0, preset)">Call</button><button class="text-button" @click="localCommand(0, 5, 0, preset)">Clear</button></div><small>{{ camera.presets.size }} saved · Held in memory for this camera address</small></div></div><p class="settings-footnote">Pelco-D: FF sync · 8-bit sum checksum · {{ hex(turboByte) }} turbo · speed 00 is slow motion. Supports standard motion, lens flags, auto focus, power, generic auto scan, absolute pan/tilt, display zero, presets 1–32, flip (33), and zero pan (34), plus IRIS thermal palette/mode presets and lamp control (90 → 3/4). Extended commands outside this set are flagged. This is a receive-only visual simulator; it does not implement protocol replies. <a href="https://www.ptzprotocols.com/1%20Pelco%20PTZ%20Protocols/D/DPprotoEPDF.pdf" target="_blank" rel="noopener noreferrer">Protocol reference ↗</a></p></details>
-      <footer class="page-footer"><span>IRIS SIMULATORS <i>·</i> PELCO-D WORKBENCH</span><span>Local simulation. Real bytes.</span></footer>
+      </div>
+      <footer class="page-footer"><span>IRIS SIMULATORS <i>·</i> SERIAL WORKBENCH</span><span>Local simulation. Real bytes.</span></footer>
     </main>
   </div>
 </template>

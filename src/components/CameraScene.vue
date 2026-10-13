@@ -7,7 +7,7 @@ import { createPtzCamera } from '../scene/ptzCamera'
 import { createThermalView, type HeatSource } from '../scene/thermalView'
 import { findPalette } from '../simulation/thermalPalettes'
 
-const props = defineProps<{ camera: CameraState; showFrustum: boolean }>()
+const props = defineProps<{ camera: CameraState; showFrustum: boolean; compact?: boolean }>()
 const host = ref<HTMLDivElement>()
 const fullscreenButton = ref<HTMLButtonElement>()
 const isFullscreen = ref(false)
@@ -63,7 +63,7 @@ onMounted(() => {
   const element = host.value
   try {
     const renderer = new THREE.WebGLRenderer({ antialias: true })
-    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2))
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, props.compact ? 1.5 : 2))
     renderer.shadowMap.enabled = true
     renderer.shadowMap.type = THREE.PCFSoftShadowMap
     renderer.setClearColor(0x131c24)
@@ -73,7 +73,7 @@ onMounted(() => {
     scene.add(new THREE.HemisphereLight(0xcde6ff, 0x283236, 2.8))
     const light = new THREE.DirectionalLight(0xffffff, 4)
     light.position.set(5, 15, 9); light.castShadow = true
-    light.shadow.mapSize.set(2048, 2048)
+    light.shadow.mapSize.set(props.compact ? 1024 : 2048, props.compact ? 1024 : 2048)
     light.shadow.camera.left = -20; light.shadow.camera.right = 20
     light.shadow.camera.top = 20; light.shadow.camera.bottom = -20
     scene.add(light)
@@ -118,8 +118,8 @@ onMounted(() => {
       const angle = index / 12 * Math.PI * 2
       const marker = new THREE.Group(); scene.add(marker)
       heatSources.push({ object: marker, heat: 0.25 + index / 11 * 0.67 })
-      marker.position.set(Math.sin(angle) * 18, 0, Math.cos(angle) * 18)
-      marker.rotation.y = angle + Math.PI
+      marker.position.set(-Math.sin(angle) * 18, 0, Math.cos(angle) * 18)
+      marker.rotation.y = Math.PI - angle
       const color = new THREE.Color().setHSL(index / 12, 0.28, 0.42)
       mesh(new THREE.BoxGeometry(2.2, 2 + index % 3, 1.4), new THREE.MeshStandardMaterial({ color }), marker, 0, (2 + index % 3) / 2)
       mesh(new THREE.BoxGeometry(0.12, 5.5, 0.12), dark, marker, 1.65, 2.75).userData.heat = 0.17
@@ -137,16 +137,21 @@ onMounted(() => {
       backLabel.userData.heat = 0.22
     }
     const thermalView = createThermalView(heatSources)
-    let width = 1; let height = 1; let frame = 0; let lastFov = -1
+    let width = 1; let height = 1; let frame = 0; let lastFov = -1; let lastRendered = 0
     const resize = new ResizeObserver(() => {
       width = element.clientWidth; height = element.clientHeight
+      if (!width || !height) return
       renderer.setSize(width, height); view.aspect = width / height; view.updateProjectionMatrix()
       element.style.setProperty('--lens-height', `${Math.min(width * 0.36, 280) * 9 / 16}px`)
     })
     resize.observe(element)
-    function render() {
+    function render(now = performance.now()) {
       frame = requestAnimationFrame(render)
-      pan.rotation.y = THREE.MathUtils.degToRad(props.camera.pan)
+      if (!width || !height) return
+      if (props.compact && !isFullscreen.value && now - lastRendered < 1000 / 30) return
+      lastRendered = now
+      // The model faces +Z; increasing protocol pan turns to the lens's right (-X).
+      pan.rotation.y = -THREE.MathUtils.degToRad(props.camera.pan)
       tilt.rotation.x = -THREE.MathUtils.degToRad(props.camera.tilt)
       ledMaterial.color.set(props.camera.power ? 0x58dec0 : 0xee665e)
       const lampEnabled = props.camera.lampOn && props.camera.power
@@ -166,8 +171,9 @@ onMounted(() => {
       controls.update()
       renderer.setScissorTest(false); renderer.setViewport(0, 0, width, height); renderer.render(scene, view)
       const insetWidth = Math.min(width * 0.36, 280); const insetHeight = insetWidth * 9 / 16
-      renderer.setScissorTest(true); renderer.setViewport(width - insetWidth - 20, 20, insetWidth, insetHeight)
-      renderer.setScissor(width - insetWidth - 20, 20, insetWidth, insetHeight)
+      const insetOffset = props.compact && !isFullscreen.value ? 10 : 20
+      renderer.setScissorTest(true); renderer.setViewport(width - insetWidth - insetOffset, insetOffset, insetWidth, insetHeight)
+      renderer.setScissor(width - insetWidth - insetOffset, insetOffset, insetWidth, insetHeight)
       frustum.visible = false
       if (props.camera.power && props.camera.thermalEnabled) thermalView.render(renderer, cameraView, props.camera.thermalPalette, props.camera.thermalInverted, Math.ceil(insetWidth * renderer.getPixelRatio()), Math.ceil(insetHeight * renderer.getPixelRatio()))
       else if (props.camera.power) {
@@ -188,7 +194,7 @@ onMounted(() => {
           for (const material of materials) { if ('map' in material && material.map instanceof THREE.Texture) material.map.dispose(); material.dispose() }
         }
       })
-      renderer.dispose(); renderer.domElement.remove()
+      renderer.dispose(); renderer.forceContextLoss(); renderer.domElement.remove()
     }
   } catch (failure) { error.value = `3D view unavailable: ${failure instanceof Error ? failure.message : 'WebGL could not start'}. Packet decoding remains available.` }
 })
@@ -202,7 +208,7 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <div ref="host" class="scene-host" :class="{ 'is-fullscreen': isFullscreen }" :role="isFullscreen ? 'dialog' : undefined" :aria-modal="isFullscreen ? true : undefined" aria-label="Interactive 3D pan tilt camera simulator">
+  <div ref="host" class="scene-host" :class="{ 'is-fullscreen': isFullscreen, 'scene-compact': compact }" :role="isFullscreen ? 'dialog' : undefined" :aria-modal="isFullscreen ? true : undefined" aria-label="Interactive 3D pan tilt camera simulator">
     <div class="scene-top">
       <span class="scene-caption"><i class="status-dot"></i> LIVE SIMULATION</span>
       <div class="scene-actions">
@@ -218,3 +224,10 @@ onUnmounted(() => {
     <p v-if="error" class="webgl-error" role="alert">{{ error }}</p>
   </div>
 </template>
+
+<style scoped>
+.scene-compact:not(.is-fullscreen) .scene-top{top:10px;left:10px;right:10px}
+.scene-compact:not(.is-fullscreen) .scene-caption,.scene-compact:not(.is-fullscreen) .scene-hint,.scene-compact:not(.is-fullscreen) .scene-axis{display:none}
+.scene-compact:not(.is-fullscreen) .lens-caption{right:10px;bottom:calc(var(--lens-height,60px) + 14px);font-size:7px;letter-spacing:0}
+.scene-compact:not(.is-fullscreen) .scene-fullscreen-button{width:24px;height:24px}
+</style>

@@ -13,6 +13,7 @@ export type Command =
   | { type: 'absolute'; axis: 'pan' | 'tilt'; position: number }
   | { type: 'zero' }
   | { type: 'autofocus'; enabled: boolean }
+  | { type: 'route'; output: number; input: number }
   | { type: 'unsupported'; opcode: number }
 export interface Packet {
   bytes: number[]; issues: Issue[]; address: number; checksum: number
@@ -60,6 +61,13 @@ export function decode(bytes: readonly number[], cameraAddress: number, turboByt
       if (irisCommand) packet.description = palette ? `IRIS thermal palette: ${palette.name}` : ({ 90: 'IRIS lamp selector', 226: 'IRIS thermal off', 229: 'IRIS thermal on', 253: 'IRIS negative polarity', 254: 'IRIS positive polarity' } as Record<number, string>)[data2]
       if (data2 > 32 && data2 !== 33 && data2 !== 34 && !irisCommand) issue('warning', 'This preset is outside the supported positions and IRIS feature commands; it may be model-specific.', 5)
       if ((data2 === 33 || data2 === 34) && action !== 'call') issue('warning', 'Presets 33 and 34 are reserved for flip and zero pan in this profile.', 5)
+    } else if (cmd2 === 0x0d) {
+      // IRIS video switch framing: DATA 1 is the output, DATA 2 is the input.
+      if (cmd1 !== 0) issue('error', 'IRIS switch routing requires CMD 1 = 00.', 2)
+      if (data1 === 0) issue('error', 'Switch output numbers start at 1.', 4)
+      if (data2 === 0) issue('error', 'Switch input numbers start at 1.', 5)
+      packet.command = { type: 'route', output: data1, input: data2 }
+      packet.description = `Route input ${data2} → output ${data1}`
     } else if ([0x49, 0x4b, 0x4d, 0x2b].includes(cmd2)) {
       if (cmd1 !== 0) issue('error', 'This extended command requires CMD 1 = 00.', 2)
       if (cmd2 === 0x49) {

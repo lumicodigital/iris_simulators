@@ -41,6 +41,7 @@ export function applyPacket(camera: CameraState, packet: Packet, now = Date.now(
   if (!packet.valid) return 'Rejected'
   if (!packet.matches) return 'Other address'
   const command = packet.command
+  if (command?.type === 'route') return 'Ignored opcode'
   if (camera.lampArmedUntil) {
     const lampValue = command?.type === 'preset' && command.action === 'call' && [3, 4].includes(command.preset)
     if (lampValue && now <= camera.lampArmedUntil) {
