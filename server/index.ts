@@ -9,11 +9,12 @@ import { parseHex } from '../src/protocol/pelcoD.ts'
 const port = 4311
 const root = fileURLToPath(new URL('../dist/', import.meta.url))
 const sockets = new WebSocketServer({ noServer: true, maxPayload: 65536 })
-let serial: SerialPort | null = null
-let changingPort = false
+type Wire = 'camera' | 'nvr'
+const lines: Record<Wire, { serial: SerialPort | null; changing: boolean }> = { camera: { serial: null, changing: false }, nvr: { serial: null, changing: false } }
 const baudRates = [2400, 4800, 9600, 19200, 38400, 57600, 115200]
-function status() {
-  return { type: 'status', connected: Boolean(serial?.isOpen), path: serial?.path ?? '', baudRate: serial?.baudRate ?? 2400 }
+function status(wire: Wire = 'camera') {
+  const serial = lines[wire].serial
+  return { type: wire === 'nvr' ? 'nvr-status' : 'status', line: wire, connected: Boolean(serial?.isOpen), path: serial?.path ?? '', baudRate: serial?.baudRate ?? 9600 }
 }
 function broadcast(message: object) {
   const data = JSON.stringify(message)
@@ -43,43 +44,50 @@ async function body(request: IncomingMessage): Promise<Buffer> {
   }
   return Buffer.concat(chunks)
 }
-async function closeSerial() {
-  const current = serial
+async function closeSerial(wire: Wire = 'camera') {
+  const current = lines[wire].serial
   if (current?.isOpen) await new Promise<void>((accept, reject) => current.close(error => error ? reject(error) : accept()))
-  serial = null
-  broadcast(status())
+  lines[wire].serial = null
+  broadcast(status(wire))
 }
 const server = createServer(async (request, response) => {
   try {
     if (!trusted(request)) return json(response, 403, { error: 'Only local simulator origins are allowed.' })
     const url = new URL(request.url ?? '/', 'http://127.0.0.1:4311')
-    if (request.method === 'GET' && url.pathname === '/api/status') return json(response, 200, status())
-    if (request.method === 'GET' && url.pathname === '/api/ports') return json(response, 200, await SerialPort.list())
-    if (request.method === 'POST' && ['/api/connect', '/api/disconnect'].includes(url.pathname)) {
-      if (changingPort) return json(response, 409, { error: 'A serial connection change is already in progress.' })
-      changingPort = true
+    const wire: Wire = url.pathname.startsWith('/api/nvr/') ? 'nvr' : 'camera'
+    const path = wire === 'nvr' ? url.pathname.replace('/api/nvr/', '/api/') : url.pathname
+    const line = lines[wire]
+    if (request.method === 'GET' && path === '/api/status') return json(response, 200, status(wire))
+    if (request.method === 'GET' && path === '/api/ports') return json(response, 200, await SerialPort.list())
+    if (request.method === 'POST' && ['/api/connect', '/api/disconnect'].includes(path)) {
+      if (line.changing) return json(response, 409, { error: 'A serial connection change is already in progress.' })
+      line.changing = true
       try {
-        if (url.pathname === '/api/disconnect') { await closeSerial(); return json(response, 200, status()) }
+        if (path === '/api/disconnect') { await closeSerial(wire); return json(response, 200, status(wire)) }
         const options = JSON.parse((await body(request)).toString()) as { path?: string; baudRate?: number }
         if (!options.path || typeof options.path !== 'string' || options.path.length > 512 || !baudRates.includes(options.baudRate ?? 0)) return json(response, 400, { error: 'Choose a serial device path and a supported baud rate.' })
-        await closeSerial()
+        const other = lines[wire === 'nvr' ? 'camera' : 'nvr'].serial
+        if (other?.isOpen && other.path === options.path) return json(response, 409, { error: 'The camera bus and NVR require separate serial devices.' })
+        await closeSerial(wire)
         const candidate = new SerialPort({ path: options.path, baudRate: options.baudRate!, dataBits: 8, stopBits: 1, parity: 'none', autoOpen: false })
-        candidate.on('error', error => broadcast({ type: 'error', message: error.message }))
-        candidate.on('data', (bytes: Buffer) => broadcast({ type: 'bytes', bytes: [...bytes], source: 'serial', at: Date.now() }))
-        candidate.on('close', () => { if (serial === candidate) { serial = null; broadcast(status()) } })
+        candidate.on('error', error => broadcast({ type: 'error', line: wire, message: error.message }))
+        candidate.on('data', (bytes: Buffer) => broadcast({ type: 'bytes', line: wire, bytes: [...bytes], source: 'serial', at: Date.now() }))
+        candidate.on('close', () => { if (line.serial === candidate) { line.serial = null; broadcast(status(wire)) } })
         await new Promise<void>((accept, reject) => candidate.open(error => error ? reject(error) : accept()))
-        serial = candidate
-        broadcast(status())
-        return json(response, 200, status())
-      } finally { changingPort = false }
+        line.serial = candidate
+        broadcast(status(wire))
+        return json(response, 200, status(wire))
+      } finally { line.changing = false }
     }
     // External controllers can POST raw binary or {"hex":"FF 01 ..."}.
     // The bridge forwards RX bytes to open simulator UIs and never transmits on the serial port.
-    if (request.method === 'POST' && url.pathname === '/api/bytes') {
+    if (request.method === 'POST' && path === '/api/bytes') {
       const raw = await body(request)
       const bytes = request.headers['content-type']?.startsWith('application/octet-stream') ? [...raw] : parseHex(JSON.parse(raw.toString()).hex)
       if (!bytes.length) return json(response, 400, { error: 'At least one byte is required.' })
-      broadcast({ type: 'bytes', bytes, source: 'api', at: Date.now() })
+      const commandId = request.headers['x-iris-command-id']
+      if (commandId !== undefined && (typeof commandId !== 'string' || !/^[a-zA-Z0-9-]{1,80}$/.test(commandId))) return json(response, 400, { error: 'Invalid command ID.' })
+      broadcast({ type: 'bytes', line: wire, bytes, source: 'api', commandId: wire === 'nvr' ? commandId : undefined, at: Date.now() })
       return json(response, 200, { acceptedBytes: bytes.length, connectedClients: sockets.clients.size })
     }
     if (url.pathname.startsWith('/api/')) return json(response, 404, { error: 'Unknown API route.' })
@@ -100,13 +108,14 @@ server.on('upgrade', (request, socket, head) => {
   sockets.handleUpgrade(request, socket, head, client => {
     client.on('error', () => client.terminate())
     client.send(JSON.stringify(status()))
+    client.send(JSON.stringify(status('nvr')))
     sockets.emit('connection', client, request)
   })
 })
 server.on('error', error => { console.error(`Simulator bridge: ${error.message}`); process.exitCode = 1 })
-server.listen(port, '127.0.0.1', () => console.log(`Pelco-D serial bridge / built UI: http://127.0.0.1:${port}`))
+server.listen(port, '127.0.0.1', () => console.log(`IRIS camera and NVR serial bridge / built UI: http://127.0.0.1:${port}`))
 async function shutdown() {
-  await closeSerial().catch(() => {})
+  await Promise.all([closeSerial(), closeSerial('nvr')]).catch(() => {})
   for (const socket of sockets.clients) socket.terminate()
   sockets.close(); server.close()
 }

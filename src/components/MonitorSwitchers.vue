@@ -3,7 +3,7 @@ import { computed, nextTick, ref, watch } from 'vue'
 import { baudRates, createSwitcher, maxPorts, normalizeSwitcher, type Switcher } from '../simulation/switcher'
 import { hex } from '../protocol/pelcoD'
 
-const props = defineProps<{ switchers: Switcher[]; storageError: string }>()
+const props = defineProps<{ switchers: Switcher[]; storageError: string; firstCameraId: string }>()
 const emit = defineEmits<{ update: [devices: Switcher[]]; route: [device: Switcher, output: number, input: number] }>()
 const selectedId = ref(props.switchers[0]?.id ?? '')
 const selectedInput = ref(1)
@@ -37,7 +37,7 @@ async function routeFromSelect(output: number, event: Event) {
 function openEditor(item?: Switcher) {
   const address = Array.from({ length: 55 }, (_, i) => 201 + i).find(value => !props.switchers.some(device => device.address === value)) ?? 201
   editingId.value = item?.id ?? ''
-  draft.value = item ? { ...item, inputs: [...item.inputs], outputs: [...item.outputs], routes: { ...item.routes } } : createSwitcher(address)
+  draft.value = item ? { ...item, inputs: [...item.inputs], outputs: [...item.outputs], routes: { ...item.routes } } : createSwitcher(address, props.firstCameraId)
   inputCount.value = draft.value.inputs.length; outputCount.value = draft.value.outputs.length
   editorError.value = ''; editor.value?.showModal()
 }

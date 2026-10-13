@@ -7,7 +7,8 @@ import { createPtzCamera } from '../scene/ptzCamera'
 import { createThermalView, type HeatSource } from '../scene/thermalView'
 import { findPalette } from '../simulation/thermalPalettes'
 
-const props = defineProps<{ camera: CameraState; showFrustum: boolean; compact?: boolean }>()
+const props = defineProps<{ camera: CameraState; showFrustum: boolean; compact?: boolean; videoOnly?: boolean }>()
+const emit = defineEmits<{ videoFrame: [canvas: HTMLCanvasElement] }>()
 const host = ref<HTMLDivElement>()
 const fullscreenButton = ref<HTMLButtonElement>()
 const isFullscreen = ref(false)
@@ -63,8 +64,8 @@ onMounted(() => {
   const element = host.value
   try {
     const renderer = new THREE.WebGLRenderer({ antialias: true })
-    renderer.setPixelRatio(Math.min(window.devicePixelRatio, props.compact ? 1.5 : 2))
-    renderer.shadowMap.enabled = true
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, props.videoOnly ? 1 : props.compact ? 1.5 : 2))
+    renderer.shadowMap.enabled = !props.videoOnly
     renderer.shadowMap.type = THREE.PCFSoftShadowMap
     renderer.setClearColor(0x131c24)
     element.appendChild(renderer.domElement)
@@ -168,6 +169,18 @@ onMounted(() => {
         frustumPositions.array.set(vertices); frustumPositions.needsUpdate = true; frustumGeometry.computeBoundingSphere()
       }
       frustum.visible = props.showFrustum && props.camera.power
+      if (props.videoOnly) {
+        frustum.visible = false; lampGlow.visible = false; lampBeam.visible = false
+        // Thermal rendering uses another scene; keep this attached lens camera's pose current.
+        scene.updateMatrixWorld(true)
+        renderer.setScissorTest(false); renderer.setViewport(0, 0, width, height)
+        if (cameraView.aspect !== width / height) { cameraView.aspect = width / height; cameraView.updateProjectionMatrix() }
+        if (props.camera.power && props.camera.thermalEnabled) thermalView.render(renderer, cameraView, props.camera.thermalPalette, props.camera.thermalInverted, width, height)
+        else if (props.camera.power) renderer.render(scene, cameraView)
+        else { renderer.setClearColor(0x080c10); renderer.clear(); renderer.setClearColor(0x131c24) }
+        emit('videoFrame', renderer.domElement)
+        return
+      }
       controls.update()
       renderer.setScissorTest(false); renderer.setViewport(0, 0, width, height); renderer.render(scene, view)
       const insetWidth = Math.min(width * 0.36, 280); const insetHeight = insetWidth * 9 / 16
@@ -209,7 +222,7 @@ onUnmounted(() => {
 
 <template>
   <div ref="host" class="scene-host" :class="{ 'is-fullscreen': isFullscreen, 'scene-compact': compact }" :role="isFullscreen ? 'dialog' : undefined" :aria-modal="isFullscreen ? true : undefined" aria-label="Interactive 3D pan tilt camera simulator">
-    <div class="scene-top">
+    <div v-if="!videoOnly" class="scene-top">
       <span class="scene-caption"><i class="status-dot"></i> LIVE SIMULATION</span>
       <div class="scene-actions">
         <span class="scene-hint">Drag to orbit · Scroll to zoom</span>
@@ -219,8 +232,8 @@ onUnmounted(() => {
         </button>
       </div>
     </div>
-    <div class="scene-axis"><span class="axis-y">Y</span><span class="axis-z">Z</span><span class="axis-x">X</span></div>
-    <div class="lens-caption">{{ camera.thermalEnabled ? findPalette(camera.thermalPalette).name.toUpperCase() : 'CAMERA VIEW' }} <span>{{ camera.power ? `${camera.zoom.toFixed(1)}×` : 'OFFLINE' }}</span></div>
+    <div v-if="!videoOnly" class="scene-axis"><span class="axis-y">Y</span><span class="axis-z">Z</span><span class="axis-x">X</span></div>
+    <div v-if="!videoOnly" class="lens-caption">{{ camera.thermalEnabled ? findPalette(camera.thermalPalette).name.toUpperCase() : 'CAMERA VIEW' }} <span>{{ camera.power ? `${camera.zoom.toFixed(1)}×` : 'OFFLINE' }}</span></div>
     <p v-if="error" class="webgl-error" role="alert">{{ error }}</p>
   </div>
 </template>

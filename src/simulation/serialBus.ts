@@ -4,7 +4,7 @@ import type { Switcher } from './switcher'
 import type { SimulatedCamera } from './cameras'
 
 export interface BusSettings { cameraAddress: number; cameraBaudRate: number; baudRate: number; turboByte: number; cameras?: readonly SimulatedCamera[] }
-export interface Delivery { id: string; name: string; kind: 'camera' | 'switcher'; address: number; result: string; detail: string }
+export interface Delivery { id: string; name: string; kind: 'camera' | 'switcher' | 'nvr'; address?: number; result: string; detail: string }
 export interface BusResult { packet: Packet; result: string; deliveries: Delivery[] }
 export interface BusDiagnostic { severity: 'warning' | 'info'; message: string }
 export function busDiagnostics(settings: BusSettings, switches: readonly Switcher[]): BusDiagnostic[] {
