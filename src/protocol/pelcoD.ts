@@ -1,5 +1,6 @@
 // Pelco D Protocol v5.2.2, sections 3.1, 3.2 and 5.2–5.4.
 // https://www.ptzprotocols.com/1%20Pelco%20PTZ%20Protocols/D/DPprotoEPDF.pdf
+import { thermalPalettes } from '../simulation/thermalPalettes'
 export type Severity = 'error' | 'warning' | 'info'
 export interface Issue { severity: Severity; message: string; bytes: number[] }
 export interface Motion {
@@ -54,7 +55,10 @@ export function decode(bytes: readonly number[], cameraAddress: number, turboByt
       if (data2 === 0) issue('error', 'Preset number must be 01–FF.', 5)
       packet.command = { type: 'preset', action, preset: data2 }
       packet.description = `${action === 'save' ? 'Save' : action === 'clear' ? 'Clear' : 'Call'} preset ${data2}`
-      if (data2 > 32 && data2 !== 33 && data2 !== 34) issue('warning', 'Only presets 1–32 and calls to 33 (flip) / 34 (zero pan) are simulated; other presets may be model-specific.', 5)
+      const palette = thermalPalettes.find(item => item.preset === data2)
+      const irisCommand = action === 'call' && (palette || [90, 226, 229, 253, 254].includes(data2))
+      if (irisCommand) packet.description = palette ? `IRIS thermal palette: ${palette.name}` : ({ 90: 'IRIS lamp selector', 226: 'IRIS thermal off', 229: 'IRIS thermal on', 253: 'IRIS negative polarity', 254: 'IRIS positive polarity' } as Record<number, string>)[data2]
+      if (data2 > 32 && data2 !== 33 && data2 !== 34 && !irisCommand) issue('warning', 'This preset is outside the supported positions and IRIS feature commands; it may be model-specific.', 5)
       if ((data2 === 33 || data2 === 34) && action !== 'call') issue('warning', 'Presets 33 and 34 are reserved for flip and zero pan in this profile.', 5)
     } else if ([0x49, 0x4b, 0x4d, 0x2b].includes(cmd2)) {
       if (cmd1 !== 0) issue('error', 'This extended command requires CMD 1 = 00.', 2)

@@ -2,7 +2,8 @@
 import { computed, onMounted, onUnmounted, reactive, ref } from 'vue'
 import CameraScene from './components/CameraScene.vue'
 import { decode, fields, hex, hexBytes, makePacket, parseHex, PelcoDStream, type Packet, type StreamEvent, type Issue } from './protocol/pelcoD'
-import { applyPacket, createCamera, defaultProfile, panRate, stepCamera, stopCamera, tiltRate } from './simulation/camera'
+import { applyPacket, cameraRates, createCamera, defaultProfile, stepCamera, stopCamera, zoomSpeedFactor } from './simulation/camera'
+import { findPalette, paletteGradient, thermalPalettes } from './simulation/thermalPalettes'
 
 interface Entry { id: number; time: string; source: string; bytes: number[]; issues: Issue[]; packet?: Packet; description: string; result: string }
 interface Port { path: string; manufacturer?: string }
@@ -33,6 +34,7 @@ let held: string | null = null; let repeat: ReturnType<typeof setInterval> | und
 const panSpeed = ref(32); const tiltSpeed = ref(24); const preset = ref(1)
 const visibleEntries = computed(() => entries.value.filter(entry => filter.value === 'all' || entry.issues.some(issue => issue.severity !== 'info')))
 const displayPan = computed(() => ((camera.pan - camera.zeroPan) % 360 + 360) % 360)
+const rates = computed(() => cameraRates(camera, profile))
 const moving = computed(() => camera.target ? 'Moving to preset' : camera.scanning ? 'Auto scan' : [camera.motion.pan ? `Pan ${camera.motion.pan > 0 ? 'right' : 'left'}` : '', camera.motion.tilt ? `Tilt ${camera.motion.tilt > 0 ? 'up' : 'down'}` : '', camera.motion.zoom ? `Zoom ${camera.motion.zoom > 0 ? 'tele' : 'wide'}` : '', camera.motion.focus ? 'Focus' : '', camera.motion.iris ? 'Iris' : ''].filter(Boolean).join(' · ') || 'Stationary')
 const fieldNotes = ['Always FF', 'Camera address', 'Power / lens flags', 'Motion / opcode', 'Pan speed / data', 'Tilt speed / data', 'Sum bytes 2–6']
 function addEntry(event: StreamEvent, source: string) {
@@ -70,6 +72,15 @@ function localCommand(cmd1 = 0, cmd2 = 0, data1 = 0, data2 = 0) {
   const bytes = makePacket(address.value, cmd1, cmd2, data1, data2)
   receive(bytes, 'controls', manualStream, true)
 }
+function selectThermalPalette() { localCommand(0, 7, 0, findPalette(camera.thermalPalette).preset) }
+function toggleLamp() {
+  localCommand(0, 7, 0, 90)
+  localCommand(0, 7, 0, camera.lampOn ? 3 : 4)
+}
+function resetFeatures() {
+  camera.thermalEnabled = false; camera.thermalPalette = 'white-hot'; camera.thermalInverted = false
+  camera.lampOn = false; camera.lampArmedUntil = 0
+}
 function beginHold(direction: string, event: PointerEvent) {
   if (event.button !== 0 || held) return
   (event.currentTarget as HTMLElement).setPointerCapture(event.pointerId)
@@ -85,11 +96,13 @@ function emergencyStop() { endHold(); localCommand(); stopCamera(camera) }
 function resetCamera() {
   endHold(); stopCamera(camera)
   camera.pan = 0; camera.tilt = 0; camera.zoom = 1; camera.focus = 0.5; camera.iris = 0.7; camera.power = true; camera.watchdogStopped = false; camera.zeroPan = 0; camera.autofocus = true
+  resetFeatures()
   scene.value?.resetView()
 }
 function changeAddress() {
   address.value = Math.min(255, Math.max(1, Math.round(Number(address.value) || 1)))
   endHold(); stopCamera(camera); camera.presets.clear()
+  resetFeatures()
   serialStream.flush('Address changed while receiving an incomplete packet.').forEach(event => addEntry(event, 'serial'))
   apiStream.flush('Address changed while receiving an incomplete packet.').forEach(event => addEntry(event, 'api'))
   pending.value = []
@@ -177,9 +190,9 @@ onUnmounted(() => {
           <div class="panel-heading"><h2><span class="small-icon">◈</span> Camera visualization</h2><div class="view-actions"><label><input v-model="showFrustum" type="checkbox" /> Field of view</label><button class="icon-button" @click="scene?.resetView()" aria-label="Reset orbit view" title="Reset orbit view">↻</button></div></div>
           <CameraScene ref="scene" :camera="camera" :show-frustum="showFrustum" />
           <div class="telemetry">
-            <div><span>PAN ANGLE</span><strong>{{ displayPan.toFixed(1) }}<small>°</small></strong><em>{{ (camera.scanning ? 15 : camera.motion.pan * panRate(camera.motion.panSpeed, profile)).toFixed(1) }}° / s</em></div>
-            <div><span>TILT ANGLE</span><strong>{{ camera.tilt.toFixed(1) }}<small>°</small></strong><em>{{ (camera.motion.tilt * tiltRate(camera.motion.tiltSpeed, profile)).toFixed(1) }}° / s</em></div>
-            <div><span>OPTICAL ZOOM</span><strong>{{ camera.zoom.toFixed(1) }}<small>×</small></strong><em>1× – {{ profile.maxZoom }}× range</em></div>
+            <div><span>PAN ANGLE</span><strong>{{ displayPan.toFixed(1) }}<small>°</small></strong><em>{{ rates.pan.toFixed(1) }}° / s</em></div>
+            <div><span>TILT ANGLE</span><strong>{{ camera.tilt.toFixed(1) }}<small>°</small></strong><em>{{ rates.tilt.toFixed(1) }}° / s</em></div>
+            <div><span>OPTICAL ZOOM</span><strong>{{ camera.zoom.toFixed(1) }}<small>×</small></strong><em>{{ (100 * zoomSpeedFactor(camera.zoom)).toFixed(0) }}% pan / tilt speed</em></div>
             <div class="motion-telemetry"><span>CAMERA STATE</span><strong :class="{ mint: moving !== 'Stationary' }">{{ moving }}</strong><em>{{ camera.power ? 'Camera on' : 'Camera off' }} · Lens {{ (camera.focus * 100).toFixed(0) }}% / iris {{ (camera.iris * 100).toFixed(0) }}%</em></div>
           </div>
           <div v-if="camera.watchdogStopped" class="inline-warning" role="status">Motion stopped: no fresh motion command within {{ profile.watchdogMs / 1000 }} seconds.</div>
@@ -189,6 +202,13 @@ onUnmounted(() => {
             <div class="zoom-controls"><button class="direction-button" aria-label="Hold to zoom wide" @pointerdown="beginHold('wide', $event)" @pointerup="endHold" @pointercancel="endHold" @lostpointercapture="endHold">−</button><span>ZOOM</span><button class="direction-button" aria-label="Hold to zoom tele" @pointerdown="beginHold('tele', $event)" @pointerup="endHold" @pointercancel="endHold" @lostpointercapture="endHold">+</button></div>
             <button class="text-button reset-button" @click="resetCamera">↻ Reset camera</button>
           </div>
+          <div class="camera-effects">
+            <div class="view-mode" role="group" aria-label="Camera view mode"><button :class="{ active: !camera.thermalEnabled }" :aria-pressed="!camera.thermalEnabled" @click="localCommand(0, 7, 0, 226)">Daylight</button><button :class="{ active: camera.thermalEnabled }" :aria-pressed="camera.thermalEnabled" @click="localCommand(0, 7, 0, 229)">Thermal</button></div>
+            <label class="palette-select" for="thermal-palette">Thermal palette<select id="thermal-palette" v-model="camera.thermalPalette" @change="selectThermalPalette"><option v-for="palette in thermalPalettes" :key="palette.id" :value="palette.id">{{ palette.name }}</option></select></label>
+            <span class="palette-swatch" :style="{ background: paletteGradient(camera.thermalPalette) }" aria-hidden="true"></span>
+            <button class="button lamp-button" :class="{ 'lamp-active': camera.lampOn }" :aria-pressed="camera.lampOn" :aria-label="camera.lampOn ? 'Turn lamp off' : 'Turn lamp on'" @click="toggleLamp"><span aria-hidden="true">☀</span> Lamp {{ camera.lampOn ? 'on' : 'off' }}</button>
+          </div>
+          <div class="camera-effects-note">The camera view uses synthetic heat values. Selecting a palette opens thermal view.</div>
         </section>
 
         <aside class="panel input-panel">
@@ -218,7 +238,7 @@ onUnmounted(() => {
               <details class="api-details"><summary>Send bytes from another app</summary><p>While this UI is open, POST binary bytes to <code>http://127.0.0.1:4311/api/bytes</code> with <code>Content-Type: application/octet-stream</code>, or JSON <code>{"hex":"FF 01 00 02 20 00 23"}</code>.</p></details>
             </template>
           </div>
-          <div class="profile-note"><i>ⓘ</i><p>{{ turboByte === 255 ? 'IRIS / legacy' : 'Pelco v5.2.2' }} PTZ profile<span>Pan 80°/s · turbo {{ hex(turboByte) }} at 120°/s · tilt 40°/s<br>Timing and lens behavior are approximations.</span></p></div>
+          <div class="profile-note"><i>ⓘ</i><p>{{ turboByte === 255 ? 'IRIS / legacy' : 'Pelco v5.2.2' }} PTZ profile<span>At 1×: pan {{ profile.maxPanSpeed }}°/s · turbo {{ profile.turboPanSpeed }}°/s · tilt {{ profile.maxTiltSpeed }}°/s<br>Pan and tilt slow proportionally as zoom increases.</span></p></div>
         </aside>
       </div>
 
@@ -238,7 +258,7 @@ onUnmounted(() => {
         <div class="capture-footer"><span><i class="status-dot" :class="{ offline: !serialConnected }"></i>{{ serialConnected ? 'Listening on serial' : 'Manual input ready' }}<span v-if="pending.length"> · {{ pending.length }} byte(s) awaiting frame completion</span></span><div><span>{{ totalBytes }} bytes</span><span>{{ totalFrames }} frames</span><span :class="{ 'error-text': totalRejected > 0 }">{{ totalRejected }} rejected</span><span>Latest 200 entries</span></div></div>
       </section>
 
-      <details class="panel settings-panel"><summary>Simulation settings <span>Protocol, speeds & presets</span></summary><div class="settings-content"><label>Protocol profile<select v-model.number="turboByte" @change="emergencyStop"><option :value="255">IRIS / legacy — FF turbo</option><option :value="64">Pelco v5.2.2 — 40 turbo</option></select></label><label>Control pan speed <span>{{ hex(panSpeed === 64 ? turboByte : panSpeed) }}</span><input v-model.number="panSpeed" type="range" min="0" max="64" /></label><label>Control tilt speed <span>{{ hex(tiltSpeed) }}</span><input v-model.number="tiltSpeed" type="range" min="0" max="63" /></label><label>Motion watchdog<select v-model.number="profile.watchdogMs"><option :value="15000">15 seconds</option><option :value="2000">2 seconds</option><option :value="0">Disabled — until stop command</option></select></label><div class="preset-settings"><label for="preset">Preset (1–32)</label><input id="preset" v-model.number="preset" type="number" min="1" max="32" @change="preset = Math.min(32, Math.max(1, Math.round(preset || 1)))" /><div><button class="button secondary" @click="localCommand(0, 3, 0, preset)">Save</button><button class="button secondary" @click="localCommand(0, 7, 0, preset)">Call</button><button class="text-button" @click="localCommand(0, 5, 0, preset)">Clear</button></div><small>{{ camera.presets.size }} saved · Held in memory for this camera address</small></div></div><p class="settings-footnote">Pelco-D: FF sync · 8-bit sum checksum · {{ hex(turboByte) }} turbo · speed 00 is slow motion. Supports standard motion, lens flags, auto focus, power, generic auto scan, absolute pan/tilt, display zero, presets 1–32, flip (33), and zero pan (34). Extended commands outside this set are flagged. This is a receive-only visual simulator; it does not implement protocol replies. <a href="https://www.ptzprotocols.com/1%20Pelco%20PTZ%20Protocols/D/DPprotoEPDF.pdf" target="_blank" rel="noopener noreferrer">Protocol reference ↗</a></p></details>
+      <details class="panel settings-panel"><summary>Simulation settings <span>Protocol, speeds & presets</span></summary><div class="settings-content"><label>Protocol profile<select v-model.number="turboByte" @change="emergencyStop"><option :value="255">IRIS / legacy — FF turbo</option><option :value="64">Pelco v5.2.2 — 40 turbo</option></select></label><label>Control pan speed <span>{{ hex(panSpeed === 64 ? turboByte : panSpeed) }}</span><input v-model.number="panSpeed" type="range" min="0" max="64" /></label><label>Control tilt speed <span>{{ hex(tiltSpeed) }}</span><input v-model.number="tiltSpeed" type="range" min="0" max="63" /></label><label>Motion watchdog<select v-model.number="profile.watchdogMs"><option :value="15000">15 seconds</option><option :value="2000">2 seconds</option><option :value="0">Disabled — until stop command</option></select></label><div class="preset-settings"><label for="preset">Preset (1–32)</label><input id="preset" v-model.number="preset" type="number" min="1" max="32" @change="preset = Math.min(32, Math.max(1, Math.round(preset || 1)))" /><div><button class="button secondary" @click="localCommand(0, 3, 0, preset)">Save</button><button class="button secondary" @click="localCommand(0, 7, 0, preset)">Call</button><button class="text-button" @click="localCommand(0, 5, 0, preset)">Clear</button></div><small>{{ camera.presets.size }} saved · Held in memory for this camera address</small></div></div><p class="settings-footnote">Pelco-D: FF sync · 8-bit sum checksum · {{ hex(turboByte) }} turbo · speed 00 is slow motion. Supports standard motion, lens flags, auto focus, power, generic auto scan, absolute pan/tilt, display zero, presets 1–32, flip (33), and zero pan (34), plus IRIS thermal palette/mode presets and lamp control (90 → 3/4). Extended commands outside this set are flagged. This is a receive-only visual simulator; it does not implement protocol replies. <a href="https://www.ptzprotocols.com/1%20Pelco%20PTZ%20Protocols/D/DPprotoEPDF.pdf" target="_blank" rel="noopener noreferrer">Protocol reference ↗</a></p></details>
       <footer class="page-footer"><span>IRIS SIMULATORS <i>·</i> PELCO-D WORKBENCH</span><span>Local simulation. Real bytes.</span></footer>
     </main>
   </div>

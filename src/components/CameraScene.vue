@@ -3,15 +3,63 @@ import { onMounted, onUnmounted, ref } from 'vue'
 import * as THREE from 'three'
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js'
 import type { CameraState } from '../simulation/camera'
+import { createPtzCamera } from '../scene/ptzCamera'
+import { createThermalView, type HeatSource } from '../scene/thermalView'
+import { findPalette } from '../simulation/thermalPalettes'
 
 const props = defineProps<{ camera: CameraState; showFrustum: boolean }>()
 const host = ref<HTMLDivElement>()
+const fullscreenButton = ref<HTMLButtonElement>()
+const isFullscreen = ref(false)
 const error = ref('')
 let dispose = () => {}
 let resetView = () => {}
+let nativeFullscreen = false
+let previousOverflow = ''
+function setFullscreen(active: boolean) {
+  if (isFullscreen.value === active) return
+  if (active) {
+    previousOverflow = document.body.style.overflow
+    document.body.style.overflow = 'hidden'
+  } else document.body.style.overflow = previousOverflow
+  isFullscreen.value = active
+}
+async function exitFullscreen() {
+  if (document.fullscreenElement === host.value) {
+    try { await document.exitFullscreen() } catch { /* Keep the in-page exit available. */ }
+  }
+  nativeFullscreen = false
+  setFullscreen(false)
+  fullscreenButton.value?.focus({ preventScroll: true })
+}
+async function toggleFullscreen() {
+  if (isFullscreen.value) { await exitFullscreen(); return }
+  setFullscreen(true)
+  try {
+    // The fixed viewport also works in embedded browsers that deny native fullscreen.
+    await host.value?.requestFullscreen?.()
+  } catch { /* The scene already fills the viewport through its fullscreen class. */ }
+}
+function onFullscreenChange() {
+  if (document.fullscreenElement === host.value) {
+    nativeFullscreen = true
+    setFullscreen(true)
+  } else if (nativeFullscreen) {
+    nativeFullscreen = false
+    setFullscreen(false)
+    fullscreenButton.value?.focus({ preventScroll: true })
+  }
+}
+function onFullscreenKey(event: KeyboardEvent) {
+  if (!isFullscreen.value) return
+  if (event.key === 'Escape') { event.preventDefault(); void exitFullscreen() }
+  else if (event.key === 'Tab') { event.preventDefault(); fullscreenButton.value?.focus() }
+}
 defineExpose({ resetView: () => resetView() })
 onMounted(() => {
   if (!host.value) return
+  document.addEventListener('fullscreenchange', onFullscreenChange)
+  document.addEventListener('keydown', onFullscreenKey)
   const element = host.value
   try {
     const renderer = new THREE.WebGLRenderer({ antialias: true })
@@ -33,11 +81,9 @@ onMounted(() => {
     const controls = new OrbitControls(view, renderer.domElement)
     controls.enableDamping = true; controls.maxPolarAngle = Math.PI / 2 - 0.04
     controls.minDistance = 3; controls.maxDistance = 40
-    resetView = () => { view.position.set(6.5, 6, 9); controls.target.set(0, 2.8, 0); controls.update() }
+    resetView = () => { view.position.set(3.4, 3.6, 5.8); controls.target.set(0, 1.80, 0); controls.update() }
     resetView()
-    const grey = new THREE.MeshStandardMaterial({ color: 0xe4e9e9, metalness: 0.45, roughness: 0.3 })
     const dark = new THREE.MeshStandardMaterial({ color: 0x25333d, metalness: 0.6, roughness: 0.35 })
-    const glass = new THREE.MeshStandardMaterial({ color: 0x125474, metalness: 0.8, roughness: 0.12 })
     function mesh(geometry: THREE.BufferGeometry, material: THREE.Material, parent: THREE.Object3D, x = 0, y = 0, z = 0) {
       const item = new THREE.Mesh(geometry, material)
       item.position.set(x, y, z); item.castShadow = true; item.receiveShadow = true
@@ -47,42 +93,36 @@ onMounted(() => {
     ground.rotation.x = -Math.PI / 2
     const grid = new THREE.GridHelper(60, 60, 0x344b57, 0x243840)
     grid.position.y = 0.01; scene.add(grid)
-    const pedestal = new THREE.Group(); scene.add(pedestal)
-    mesh(new THREE.CylinderGeometry(0.72, 0.85, 0.18, 48), dark, pedestal, 0, 0.11)
-    mesh(new THREE.CylinderGeometry(0.18, 0.24, 2.8, 32), dark, pedestal, 0, 1.55)
-    mesh(new THREE.CylinderGeometry(0.58, 0.48, 0.24, 48), grey, pedestal, 0, 3)
-    const pan = new THREE.Group(); pan.position.y = 3.16; scene.add(pan)
-    mesh(new THREE.CylinderGeometry(0.46, 0.5, 0.27, 48), dark, pan, 0, 0.1)
-    mesh(new THREE.BoxGeometry(0.18, 1.12, 0.5), grey, pan, -0.69, 0.6)
-    mesh(new THREE.BoxGeometry(0.18, 1.12, 0.5), grey, pan, 0.69, 0.6)
-    const tilt = new THREE.Group(); tilt.position.y = 0.82; pan.add(tilt)
-    mesh(new THREE.BoxGeometry(1.17, 0.9, 1.5), grey, tilt)
-    mesh(new THREE.BoxGeometry(1.25, 0.12, 1.72), grey, tilt, 0, 0.48, 0.05)
-    mesh(new THREE.BoxGeometry(0.96, 0.7, 0.06), dark, tilt, 0, 0, 0.78)
-    const lensRing = mesh(new THREE.CylinderGeometry(0.29, 0.3, 0.22, 48), dark, tilt, 0, 0, 0.88)
-    lensRing.rotation.x = Math.PI / 2
-    const lens = mesh(new THREE.CylinderGeometry(0.22, 0.22, 0.025, 48), glass, tilt, 0, 0, 1.01)
-    lens.rotation.x = Math.PI / 2
-    const ledMaterial = new THREE.MeshBasicMaterial({ color: 0x58dec0 })
-    mesh(new THREE.SphereGeometry(0.04, 12, 12), ledMaterial, tilt, 0.39, -0.2, 0.825)
-    for (let index = 0; index < 5; index++) mesh(new THREE.BoxGeometry(0.6, 0.025, 0.03), dark, tilt, 0, -0.28 + index * 0.08, -0.76)
+    const { pan, tilt, ledMaterial, lensAnchor } = createPtzCamera(scene)
+    const lamp = new THREE.SpotLight(0xffe6b4, 0, 30, Math.PI / 7, 0.5, 2)
+    lamp.position.set(0.4, -0.25, 0.82)
+    lamp.target.position.set(0.4, -0.25, 14)
+    tilt.add(lamp); tilt.add(lamp.target)
+    const lampGlowMaterial = new THREE.MeshBasicMaterial({ color: 0xffedc0 })
+    const lampGlow = mesh(new THREE.SphereGeometry(0.025, 12, 12), lampGlowMaterial, tilt, 0.42, -0.2, 0.65)
+    const lampBeamMaterial = new THREE.MeshBasicMaterial({ color: 0xffe6b4, transparent: true, opacity: 0.035, depthWrite: false, side: THREE.DoubleSide })
+    const lampBeam = mesh(new THREE.CylinderGeometry(0, 3.5, 12, 32, 1, true), lampBeamMaterial, tilt, 0.4, -0.25, 6.82)
+    lampBeam.rotation.x = -Math.PI / 2; lampBeam.castShadow = false; lampBeam.receiveShadow = false
     const frustumGeometry = new THREE.BufferGeometry()
     const frustumPositions = new THREE.Float32BufferAttribute(new Float32Array(48), 3)
     frustumPositions.setUsage(THREE.DynamicDrawUsage)
     frustumGeometry.setAttribute('position', frustumPositions)
     const frustum = new THREE.LineSegments(frustumGeometry, new THREE.LineBasicMaterial({ color: 0x55dec2, transparent: true, opacity: 0.5 }))
-    frustum.position.z = 1.03; tilt.add(frustum)
+    frustum.position.copy(lensAnchor); tilt.add(frustum)
     const cameraView = new THREE.PerspectiveCamera(60, 16 / 9, 0.05, 100)
-    cameraView.position.z = 1.04; cameraView.rotation.y = Math.PI; tilt.add(cameraView)
+    cameraView.position.copy(lensAnchor); cameraView.rotation.y = Math.PI; tilt.add(cameraView)
+    const heatSources: HeatSource[] = [{ object: ground, heat: 0.15 }]
+    // Synthetic heat values are separate from visible colour and lamp illumination.
     // Calibration objects make pan, tilt and changing field of view easy to see.
     for (let index = 0; index < 12; index++) {
       const angle = index / 12 * Math.PI * 2
       const marker = new THREE.Group(); scene.add(marker)
+      heatSources.push({ object: marker, heat: 0.25 + index / 11 * 0.67 })
       marker.position.set(Math.sin(angle) * 18, 0, Math.cos(angle) * 18)
       marker.rotation.y = angle + Math.PI
       const color = new THREE.Color().setHSL(index / 12, 0.28, 0.42)
       mesh(new THREE.BoxGeometry(2.2, 2 + index % 3, 1.4), new THREE.MeshStandardMaterial({ color }), marker, 0, (2 + index % 3) / 2)
-      mesh(new THREE.BoxGeometry(0.12, 5.5, 0.12), dark, marker, 1.65, 2.75)
+      mesh(new THREE.BoxGeometry(0.12, 5.5, 0.12), dark, marker, 1.65, 2.75).userData.heat = 0.17
       const board = document.createElement('canvas'); board.width = 256; board.height = 256
       const context = board.getContext('2d')!
       context.fillStyle = '#dce6e8'; context.fillRect(0, 0, 256, 256)
@@ -91,10 +131,12 @@ onMounted(() => {
       context.font = '24px monospace'; context.fillText('DEGREES', 128, 194)
       const texture = new THREE.CanvasTexture(board); texture.colorSpace = THREE.SRGBColorSpace
       const labelMaterial = new THREE.MeshBasicMaterial({ map: texture })
-      mesh(new THREE.PlaneGeometry(1.4, 1.4), labelMaterial, marker, 1.65, 5.4, 0.09)
+      mesh(new THREE.PlaneGeometry(1.4, 1.4), labelMaterial, marker, 1.65, 5.4, 0.09).userData.heat = 0.22
       const backLabel = mesh(new THREE.PlaneGeometry(1.4, 1.4), labelMaterial, marker, 1.65, 5.4, -0.09)
       backLabel.rotation.y = Math.PI
+      backLabel.userData.heat = 0.22
     }
+    const thermalView = createThermalView(heatSources)
     let width = 1; let height = 1; let frame = 0; let lastFov = -1
     const resize = new ResizeObserver(() => {
       width = element.clientWidth; height = element.clientHeight
@@ -107,6 +149,10 @@ onMounted(() => {
       pan.rotation.y = THREE.MathUtils.degToRad(props.camera.pan)
       tilt.rotation.x = -THREE.MathUtils.degToRad(props.camera.tilt)
       ledMaterial.color.set(props.camera.power ? 0x58dec0 : 0xee665e)
+      const lampEnabled = props.camera.lampOn && props.camera.power
+      // Keep the light in the shader configuration so a toggle only changes uniforms.
+      lamp.intensity = lampEnabled ? 900 : 0
+      lampGlow.visible = lampEnabled; lampBeam.visible = lampEnabled
       const fov = THREE.MathUtils.radToDeg(2 * Math.atan(Math.tan(Math.PI / 6) / props.camera.zoom))
       if (Math.abs(lastFov - fov) > 0.005) {
         cameraView.fov = fov; cameraView.updateProjectionMatrix(); lastFov = fov
@@ -123,13 +169,18 @@ onMounted(() => {
       renderer.setScissorTest(true); renderer.setViewport(width - insetWidth - 20, 20, insetWidth, insetHeight)
       renderer.setScissor(width - insetWidth - 20, 20, insetWidth, insetHeight)
       frustum.visible = false
-      if (props.camera.power) renderer.render(scene, cameraView)
+      if (props.camera.power && props.camera.thermalEnabled) thermalView.render(renderer, cameraView, props.camera.thermalPalette, props.camera.thermalInverted, Math.ceil(insetWidth * renderer.getPixelRatio()), Math.ceil(insetHeight * renderer.getPixelRatio()))
+      else if (props.camera.power) {
+        lampGlow.visible = false; lampBeam.visible = false
+        renderer.render(scene, cameraView)
+      }
       else { renderer.setClearColor(0x080c10); renderer.clear(); renderer.setClearColor(0x131c24) }
       renderer.setScissorTest(false)
     }
     render()
     dispose = () => {
       cancelAnimationFrame(frame); resize.disconnect(); controls.dispose()
+      thermalView.dispose()
       scene.traverse(object => {
         if (object instanceof THREE.Mesh || object instanceof THREE.LineSegments) {
           object.geometry.dispose()
@@ -141,14 +192,29 @@ onMounted(() => {
     }
   } catch (failure) { error.value = `3D view unavailable: ${failure instanceof Error ? failure.message : 'WebGL could not start'}. Packet decoding remains available.` }
 })
-onUnmounted(() => dispose())
+onUnmounted(() => {
+  document.removeEventListener('fullscreenchange', onFullscreenChange)
+  document.removeEventListener('keydown', onFullscreenKey)
+  if (document.fullscreenElement === host.value) void document.exitFullscreen().catch(() => {})
+  setFullscreen(false)
+  dispose()
+})
 </script>
 
 <template>
-  <div ref="host" class="scene-host" aria-label="Interactive 3D pan tilt camera simulator">
-    <div class="scene-top"><span class="scene-caption"><i class="status-dot"></i> LIVE SIMULATION</span><span class="scene-hint">Drag to orbit · Scroll to zoom</span></div>
+  <div ref="host" class="scene-host" :class="{ 'is-fullscreen': isFullscreen }" :role="isFullscreen ? 'dialog' : undefined" :aria-modal="isFullscreen ? true : undefined" aria-label="Interactive 3D pan tilt camera simulator">
+    <div class="scene-top">
+      <span class="scene-caption"><i class="status-dot"></i> LIVE SIMULATION</span>
+      <div class="scene-actions">
+        <span class="scene-hint">Drag to orbit · Scroll to zoom</span>
+        <button ref="fullscreenButton" type="button" class="icon-button scene-fullscreen-button" :aria-label="isFullscreen ? 'Exit fullscreen' : 'Enter fullscreen'" :title="isFullscreen ? 'Exit fullscreen (Esc)' : 'Enter fullscreen'" :aria-pressed="isFullscreen" @click="toggleFullscreen">
+          <svg v-if="!isFullscreen" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><path d="M8 3H3v5M16 3h5v5M3 16v5h5M21 16v5h-5" /></svg>
+          <svg v-else viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><path d="M3 8h5V3M21 8h-5V3M8 21v-5H3M16 21v-5h5" /></svg>
+        </button>
+      </div>
+    </div>
     <div class="scene-axis"><span class="axis-y">Y</span><span class="axis-z">Z</span><span class="axis-x">X</span></div>
-    <div class="lens-caption">CAMERA VIEW <span>{{ camera.power ? `${camera.zoom.toFixed(1)}×` : 'OFFLINE' }}</span></div>
+    <div class="lens-caption">{{ camera.thermalEnabled ? findPalette(camera.thermalPalette).name.toUpperCase() : 'CAMERA VIEW' }} <span>{{ camera.power ? `${camera.zoom.toFixed(1)}×` : 'OFFLINE' }}</span></div>
     <p v-if="error" class="webgl-error" role="alert">{{ error }}</p>
   </div>
 </template>
