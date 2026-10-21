@@ -5,8 +5,11 @@ import MonitorSwitchers from './components/MonitorSwitchers.vue'
 import SharedBusPanel from './components/SharedBusPanel.vue'
 import SimulatorOverview from './components/SimulatorOverview.vue'
 import MonitorSimulation from './components/MonitorSimulation.vue'
-import { fields, hex, hexBytes, makePacket, parseHex } from './protocol/pelcoD'
-import { decodeNvr, NvrStream, nvrFields } from './protocol/nvr'
+import SerialConnection from './components/SerialConnection.vue'
+import SerialSourceMenu from './components/SerialSourceMenu.vue'
+import PacketInspector from './components/PacketInspector.vue'
+import { hex, hexBytes, makePacket, parseHex } from './protocol/pelcoD'
+import { decodeNvr, NvrStream } from './protocol/nvr'
 import { applyNvrPacket, createNvr, loadNvrConfig, nvrStorageKey, type NvrConfig, type NvrState } from './simulation/nvr'
 import { cameraRates, createCamera, defaultProfile, stepCamera, stopCamera, zoomSpeedFactor } from './simulation/camera'
 import { findPalette, paletteGradient, thermalPalettes } from './simulation/thermalPalettes'
@@ -14,9 +17,10 @@ import { dispatchPacket, SharedSerialBus, type BusStreamEvent } from './simulati
 import { createSwitcher, loadSwitchers, switcherStorageKey, type Switcher } from './simulation/switcher'
 import { createDefaultNvrConfig } from './simulation/defaults'
 
-import { cameraStorageKey, createDefaultCameras, loadCameras, maxCameras, normalizeCameraConfig, type CameraConfig, type SimulatedCamera } from './simulation/cameras'
-import type { CaptureEntry as Entry } from './simulation/history'
-interface Port { path: string; manufacturer?: string }
+import { cameraStorageKey, completeYachtCameras, createDefaultCameras, loadCameras, maxCameras, normalizeCameraConfig, type CameraConfig, type SimulatedCamera } from './simulation/cameras'
+import { environmentStorageKey, loadEnvironment, loadNight, loadWaveStrength, normalizeWaveStrength, nightStorageKey, waveStrengthStorageKey, yachtMountFor, type SceneEnvironment } from './simulation/environment'
+import { cameraHistory, captureSummary, pelcoAddress, type CaptureEntry as Entry } from './simulation/history'
+import type { SerialPortInfo } from './simulation/serialPorts'
 const cameras = ref(loadCameras())
 const selectedCameraId = ref(cameras.value[0].id)
 const selectedCamera = computed(() => cameras.value.find(item => item.id === selectedCameraId.value) ?? cameras.value[0])
@@ -25,6 +29,11 @@ const profile = reactive({ ...defaultProfile })
 const turboByte = ref(0xff)
 const address = computed({ get: () => selectedCamera.value.address, set: value => { selectedCamera.value.address = value } })
 const activeSimulator = ref('monitors')
+const sceneEnvironment = ref(loadEnvironment())
+const night = ref(loadNight())
+const waveStrength = ref(loadWaveStrength())
+watch(waveStrength, value => { try { localStorage.setItem(waveStrengthStorageKey, String(normalizeWaveStrength(value))) } catch { /* Keep sea state adjustable for this session. */ } })
+watch(night, value => { try { localStorage.setItem(nightStorageKey, String(value)) } catch { /* Keep lighting available for this session. */ } })
 const switchers = ref(loadSwitchers(cameras.value[0].id))
 const nvr = reactive(createNvr())
 const nvrConfig = ref(loadNvrConfig(cameras.value))
@@ -62,6 +71,20 @@ function updateCameras(configs: CameraConfig[]) {
   })
   if (!cameras.value.some(item => item.id === selectedCameraId.value)) selectedCameraId.value = cameras.value[0].id
 }
+function changeEnvironment(environment: SceneEnvironment) {
+  if (environment === 'yacht') {
+    const before = new Set(cameras.value.map(camera => camera.id))
+    updateCameras(completeYachtCameras(cameras.value, switchers.value.map(device => device.address)))
+    const channels = { ...nvrConfig.value.channels }
+    for (const camera of cameras.value.filter(camera => !before.has(camera.id))) {
+      const channel = Array.from({ length: 32 }, (_, i) => i + 1).find(value => !Object.hasOwn(channels, value))
+      if (channel) channels[channel] = camera.id
+    }
+    nvrConfig.value = { ...nvrConfig.value, channels }
+  }
+  sceneEnvironment.value = environment
+  try { localStorage.setItem(environmentStorageKey, environment) } catch { /* The scene still works for this session. */ }
+}
 function flushSetupStreams() {
   bus.flush('Configuration changed during an incomplete camera-bus packet.').forEach(addEntry); pending.value = []
   nvrStream.flush('Configuration changed during an incomplete NVR packet.').forEach(event => addNvrEntry(event)); nvrPending.value = []; nvrCommandId = undefined
@@ -91,12 +114,28 @@ const tab = ref('hex')
 const input = ref('FF 01 00 02 20 00 23')
 const inputError = ref('')
 const entries = ref<Entry[]>([])
-const selected = ref<Entry>()
+const busSelection = ref<Entry>()
+const cameraSelections = reactive<Record<number, number>>({})
+const selectedNvrId = ref<number>()
+const captureEntries = computed(() => activeSimulator.value === 'camera' ? cameraHistory(entries.value, address.value) : entries.value.filter(entry => entry.protocol !== 'nvr'))
+const captureStats = computed(() => captureSummary(captureEntries.value))
+const selected = computed<Entry | undefined>({
+  get: () => {
+    const id = activeSimulator.value === 'camera' ? cameraSelections[address.value] : busSelection.value?.id
+    return captureEntries.value.find(entry => entry.id === id) ?? captureEntries.value[0]
+  },
+  set: entry => {
+    if (!entry || entry.protocol === 'nvr') return
+    busSelection.value = entry
+    const target = pelcoAddress(entry)
+    if (target !== undefined) cameraSelections[target] = entry.id
+  },
+})
 const filter = ref('all')
-const totalBytes = ref(0); const totalFrames = ref(0); const totalRejected = ref(0)
 const showFrustum = ref(true)
 const scene = ref<InstanceType<typeof CameraScene>>()
-const ports = ref<Port[]>([])
+const ports = ref<SerialPortInfo[]>([])
+const refreshingPorts = ref(false); const portsError = ref('')
 const serialPath = ref(''); const baudRate = ref(9600)
 const serialConnected = ref(false); const connectedPath = ref('')
 const bridgeConnected = ref(false); const connectionError = ref(''); const busy = ref(false)
@@ -105,6 +144,7 @@ const pending = ref<number[]>([])
 const nvrStream = new NvrStream()
 const nvrPending = ref<number[]>([])
 const nvrConnected = ref(false); const nvrPath = ref(''); const nvrLineBaud = ref(9600)
+const nvrSerialPath = ref(''); const nvrBaudRate = ref(9600)
 const nvrBusy = ref(false); const nvrError = ref('')
 let nvrSource = 'nvr-api'
 let nvrCommandId: string | undefined
@@ -112,12 +152,10 @@ let socket: WebSocket | undefined; let reconnect: ReturnType<typeof setTimeout> 
 let interval: ReturnType<typeof setInterval> | undefined; let frame = 0; let sequence = 0; let disposed = false
 let held: string | null = null; let repeat: ReturnType<typeof setInterval> | undefined
 const panSpeed = ref(32); const tiltSpeed = ref(24); const preset = ref(1)
-const visibleEntries = computed(() => entries.value.filter(entry => filter.value === 'all' || entry.issues.some(issue => issue.severity !== 'info')))
+const visibleEntries = computed(() => captureEntries.value.filter(entry => filter.value === 'all' || entry.issues.some(issue => issue.severity !== 'info')))
 const displayPan = computed(() => ((camera.value.pan - camera.value.zeroPan) % 360 + 360) % 360)
 const rates = computed(() => cameraRates(camera.value, profile))
 const moving = computed(() => camera.value.target ? 'Moving to preset' : camera.value.scanning ? 'Auto scan' : [camera.value.motion.pan ? `Pan ${camera.value.motion.pan > 0 ? 'right' : 'left'}` : '', camera.value.motion.tilt ? `Tilt ${camera.value.motion.tilt > 0 ? 'up' : 'down'}` : '', camera.value.motion.zoom ? `Zoom ${camera.value.motion.zoom > 0 ? 'tele' : 'wide'}` : '', camera.value.motion.focus ? 'Focus' : '', camera.value.motion.iris ? 'Iris' : ''].filter(Boolean).join(' · ') || 'Stationary')
-const inspectorFields = computed(() => selected.value?.protocol === 'nvr' ? nvrFields : fields)
-const fieldNotes = computed(() => selected.value?.protocol === 'nvr' ? ['Always AA', 'Key matrix row', 'Key matrix column', '01 press / 00 release'] : ['Always FF', 'Device address', 'Power / lens flags', 'Motion / opcode', selected.value?.packet?.command?.type === 'route' ? 'Switch output number' : 'Pan speed / data', selected.value?.packet?.command?.type === 'route' ? 'Switch input number' : 'Tilt speed / data', 'Sum bytes 2–6'])
 function entryTone(entry: Entry) { return entry.issues.some(issue => issue.severity === 'error') ? 'error' : entry.issues.some(issue => issue.severity === 'warning') ? 'warning' : ['Ignored', 'No device', 'No preset'].includes(entry.result) ? 'neutral' : 'success' }
 function addEntry(event: BusStreamEvent) {
   const dispatched = event.issue ? undefined : dispatchPacket(event.bytes, cameras.value, switchers.value, busSettings.value)
@@ -126,11 +164,8 @@ function addEntry(event: BusStreamEvent) {
   const entry: Entry = { id: ++sequence, time: new Date().toLocaleTimeString('en-GB', { hour12: false }) + '.' + String(Date.now() % 1000).padStart(3, '0'), source: event.source, bytes: event.bytes, issues: packet?.issues ?? [event.issue!], packet, description: packet?.description ?? (event.issue?.severity === 'warning' ? 'Interleaving detected' : 'Framing error'), result, deliveries: dispatched?.deliveries ?? [] }
   entries.value.unshift(entry); entries.value = entries.value.slice(0, 200)
   selected.value = entry
-  if (packet) totalFrames.value++
-  if (result === 'Rejected' || entry.deliveries.some(item => item.result === 'Rejected')) totalRejected.value++
 }
 function receive(bytes: number[], source: string, complete = false) {
-  totalBytes.value += bytes.length
   bus.receive(bytes, source, complete).forEach(addEntry)
   pending.value = bus.pending
 }
@@ -145,12 +180,9 @@ function addNvrEntry(event: { bytes: number[]; issue?: import('./protocol/pelcoD
   }
   const description = packet?.description ?? 'NVR framing error'
   const entry: Entry = { id: ++sequence, time: new Date().toLocaleTimeString('en-GB', { hour12: false }) + '.' + String(Date.now() % 1000).padStart(3, '0'), source, bytes: event.bytes, issues: packet?.issues ?? [event.issue!], description, result, protocol: 'nvr', deliveries: [{ id: 'nvr', name: nvrConfig.value.name, kind: 'nvr', result, detail: description }] }
-  entries.value.unshift(entry); entries.value = entries.value.slice(0, 200); selected.value = entry
-  if (packet) totalFrames.value++
-  if (result === 'Rejected') totalRejected.value++
+  entries.value.unshift(entry); entries.value = entries.value.slice(0, 200)
 }
 function receiveNvr(bytes: number[], source = 'nvr-controls', complete = false, commandId?: string) {
-  totalBytes.value += bytes.length
   nvrSource = source
   if (commandId !== nvrCommandId && nvrStream.pending.length) nvrStream.flush('New NVR command interrupted an incomplete packet.').forEach(event => addNvrEntry(event, source))
   if (complete || commandId !== nvrCommandId) nvr.lastDigit = undefined
@@ -159,7 +191,7 @@ function receiveNvr(bytes: number[], source = 'nvr-controls', complete = false, 
   if (complete) { nvrStream.flush().forEach(event => addNvrEntry(event, source)); nvr.lastDigit = undefined }
   nvrPending.value = nvrStream.pending
 }
-function inspectNvr(entry: Entry) { selected.value = entry; activeSimulator.value = 'switchers'; void requestAnimationFrame(() => document.querySelector('.inspector-panel')?.scrollIntoView({ behavior: 'smooth', block: 'start' })) }
+function inspectNvr(entry: Entry) { selectedNvrId.value = entry.id; activeSimulator.value = 'overview'; void requestAnimationFrame(() => document.getElementById('overview-nvr-history')?.scrollIntoView({ behavior: 'smooth', block: 'start' })) }
 function submit() {
   try { inputError.value = ''; receive(parseHex(input.value), 'manual', true) }
   catch (error) { inputError.value = error instanceof Error ? error.message : 'Invalid hex input.' }
@@ -213,8 +245,8 @@ function beginHold(direction: string, event: PointerEvent) {
   (event.currentTarget as HTMLElement).setPointerCapture(event.pointerId)
   held = direction
   const send = () => {
-    const bits: Record<string, number> = { left: 4, right: 2, up: 8, down: 16, tele: 32, wide: 64 }
-    localCommand(0, bits[direction], ['left', 'right'].includes(direction) ? (panSpeed.value === 64 ? turboByte.value : panSpeed.value) : 0, ['up', 'down'].includes(direction) ? tiltSpeed.value : 0)
+    const bits: Record<string, number> = { left: 4, right: 2, up: 8, down: 16, tele: 32, wide: 64, 'focus-near': 0, 'focus-far': 128 }
+    localCommand(direction === 'focus-near' ? 1 : 0, bits[direction], ['left', 'right'].includes(direction) ? (panSpeed.value === 64 ? turboByte.value : panSpeed.value) : 0, ['up', 'down'].includes(direction) ? tiltSpeed.value : 0)
   }
   send(); repeat = setInterval(send, 150)
 }
@@ -244,39 +276,50 @@ async function request(path: string, body?: object) {
   return result
 }
 async function refreshPorts() {
-  try { ports.value = await request('ports'); connectionError.value = '' }
-  catch (error) { connectionError.value = error instanceof Error ? error.message : 'Cannot list serial ports.' }
+  if (refreshingPorts.value) return
+  refreshingPorts.value = true; portsError.value = ''
+  try { ports.value = await request('ports') }
+  catch (error) { portsError.value = error instanceof Error ? error.message : 'Cannot list serial ports.' }
+  finally { refreshingPorts.value = false }
 }
-async function toggleSerial() {
+async function toggleSerial(path: string, rate: number) {
   busy.value = true; connectionError.value = ''
-  try { await request(serialConnected.value ? 'disconnect' : 'connect', serialConnected.value ? {} : { path: serialPath.value, baudRate: baudRate.value }) }
+  serialPath.value = path; baudRate.value = rate
+  try { cameraSerialStatus(await request(serialConnected.value ? 'disconnect' : 'connect', serialConnected.value ? {} : { path, baudRate: rate })) }
   catch (error) { connectionError.value = error instanceof Error ? error.message : 'Serial connection failed.' }
   finally { busy.value = false }
 }
 async function toggleNvrSerial(path: string, baudRate: number) {
   nvrBusy.value = true; nvrError.value = ''
-  try { await request(nvrConnected.value ? 'nvr/disconnect' : 'nvr/connect', nvrConnected.value ? {} : { path, baudRate }) }
+  nvrSerialPath.value = path; nvrBaudRate.value = baudRate
+  try { nvrSerialStatus(await request(nvrConnected.value ? 'nvr/disconnect' : 'nvr/connect', nvrConnected.value ? {} : { path, baudRate })) }
   catch (error) { nvrError.value = error instanceof Error ? error.message : 'NVR serial connection failed.' }
   finally { nvrBusy.value = false }
+}
+function cameraSerialStatus(message: { connected: boolean; path: string; baudRate: number }) {
+  if (serialConnected.value && (!message.connected || message.path !== connectedPath.value)) {
+    bus.flush('Serial device disconnected during a packet.').forEach(addEntry); cameras.value.forEach(item => stopCamera(item.state))
+  }
+  serialConnected.value = message.connected; connectedPath.value = message.path
+  if (message.connected) { busBaudRate.value = message.baudRate; serialPath.value = message.path; baudRate.value = message.baudRate }
+  pending.value = bus.pending
+}
+function nvrSerialStatus(message: { connected: boolean; path: string; baudRate: number }) {
+  if (nvrConnected.value && (!message.connected || message.path !== nvrPath.value)) {
+    nvrStream.flush('NVR serial device disconnected during a packet.').forEach(event => addNvrEntry(event)); nvr.heldKeys.clear(); nvr.lastDigit = undefined
+  }
+  nvrConnected.value = message.connected; nvrPath.value = message.path; nvrLineBaud.value = message.baudRate
+  if (message.connected) { nvrSerialPath.value = message.path; nvrBaudRate.value = message.baudRate }
+  nvrPending.value = nvrStream.pending
 }
 function connectBridge() {
   socket = new WebSocket(`${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}/serial`)
   socket.onopen = () => { bridgeConnected.value = true; connectionError.value = '' }
   socket.onmessage = event => {
     const message = JSON.parse(event.data)
-    if (message.type === 'status') {
-      if (serialConnected.value && (!message.connected || message.path !== connectedPath.value)) {
-        bus.flush('Serial device disconnected during a packet.').forEach(addEntry); cameras.value.forEach(item => stopCamera(item.state))
-      }
-      serialConnected.value = message.connected; connectedPath.value = message.path
-      if (message.connected) busBaudRate.value = message.baudRate
-      pending.value = bus.pending
-    } else if (message.type === 'nvr-status') {
-      if (nvrConnected.value && (!message.connected || message.path !== nvrPath.value)) {
-        nvrStream.flush('NVR serial device disconnected during a packet.').forEach(event => addNvrEntry(event)); nvr.heldKeys.clear(); nvr.lastDigit = undefined
-      }
-      nvrConnected.value = message.connected; nvrPath.value = message.path; nvrLineBaud.value = message.baudRate; nvrPending.value = nvrStream.pending
-    } else if (message.type === 'bytes') {
+    if (message.type === 'status') cameraSerialStatus(message)
+    else if (message.type === 'nvr-status') nvrSerialStatus(message)
+    else if (message.type === 'bytes') {
       if (message.line === 'nvr') receiveNvr(message.bytes, `nvr-${message.source}`, false, message.commandId)
       else receive(message.bytes, message.source)
     } else if (message.type === 'error') {
@@ -293,11 +336,17 @@ function connectBridge() {
   }
 }
 function exportLog() {
-  const blob = new Blob([JSON.stringify(entries.value.slice().reverse(), null, 2)], { type: 'application/json' })
+  const blob = new Blob([JSON.stringify(captureEntries.value.slice().reverse(), null, 2)], { type: 'application/json' })
   const url = URL.createObjectURL(blob); const link = document.createElement('a')
-  link.href = url; link.download = 'iris-serial-capture.json'; link.click(); URL.revokeObjectURL(url)
+  link.href = url; link.download = activeSimulator.value === 'camera' ? `iris-camera-${address.value}-pelco-capture.json` : 'iris-pelco-capture.json'; link.click(); URL.revokeObjectURL(url)
 }
-function clearLog() { entries.value = []; selected.value = undefined; totalBytes.value = 0; totalFrames.value = 0; totalRejected.value = 0 }
+function clearLog() {
+  const ids = new Set(captureEntries.value.map(entry => entry.id))
+  entries.value = entries.value.filter(entry => !ids.has(entry.id))
+  if (activeSimulator.value === 'camera') delete cameraSelections[address.value]
+  if (busSelection.value && ids.has(busSelection.value.id)) busSelection.value = undefined
+}
+function clearNvrLog() { entries.value = entries.value.filter(entry => entry.protocol !== 'nvr'); selectedNvrId.value = undefined }
 function onVisibility() { if (document.hidden) endHold() }
 onMounted(() => {
   connectBridge(); refreshPorts()
@@ -326,21 +375,29 @@ onUnmounted(() => {
     <header class="topbar">
       <a class="brand" href="/" aria-label="IRIS Simulators home"><span class="brand-mark"><i></i><i></i><i></i><i></i></span><strong>IRIS<span> / </span>SIMULATORS</strong></a>
       <div class="simulator-tabs" role="tablist" aria-label="Simulator"><button id="overview-tab" :class="{ active: activeSimulator === 'overview' }" role="tab" :aria-selected="activeSimulator === 'overview'" aria-controls="overview-simulator" @click="activeSimulator = 'overview'"><span>▦</span> Overview</button><button id="camera-tab" :class="{ active: activeSimulator === 'camera' }" role="tab" :aria-selected="activeSimulator === 'camera'" aria-controls="camera-simulator" @click="activeSimulator = 'camera'"><span>◈</span> PTZ camera</button><button id="switcher-tab" :class="{ active: activeSimulator === 'switchers' }" role="tab" :aria-selected="activeSimulator === 'switchers'" aria-controls="switcher-simulator" @click="activeSimulator = 'switchers'"><span>⇄</span> Monitor switching <small>{{ switchers.length }}</small></button><button id="monitors-tab" :class="{ active: activeSimulator === 'monitors' }" role="tab" :aria-selected="activeSimulator === 'monitors'" aria-controls="monitor-simulator" @click="activeSimulator = 'monitors'"><span>▤</span> Simulation</button></div>
-      <div class="header-status" :aria-label="bridgeConnected ? 'Bridge online' : 'Bridge offline'"><i class="status-dot" :class="{ offline: !bridgeConnected }"></i><span class="bridge-label">{{ bridgeConnected ? 'Bridge online' : 'Bridge offline' }}</span><span class="version">v0.1</span></div>
+      <div class="header-status"><SerialSourceMenu :ports="ports" :refreshing="refreshingPorts" :ports-error="portsError" :bridge-connected="bridgeConnected" v-model:camera-path="serialPath" v-model:camera-baud="baudRate" :camera-connected="serialConnected" :camera-connected-path="connectedPath" :camera-busy="busy" :camera-error="connectionError" v-model:nvr-path="nvrSerialPath" v-model:nvr-baud="nvrBaudRate" :nvr-connected="nvrConnected" :nvr-connected-path="nvrPath" :nvr-busy="nvrBusy" :nvr-error="nvrError" @camera="toggleSerial" @nvr="toggleNvrSerial" @refresh="refreshPorts" /><div class="bridge-status" :aria-label="bridgeConnected ? 'Bridge online' : 'Bridge offline'"><i class="status-dot" :class="{ offline: !bridgeConnected }"></i><span class="bridge-label">{{ bridgeConnected ? 'Bridge online' : 'Bridge offline' }}</span><span class="version">v0.1</span></div></div>
     </header>
+
+    <div class="environment-toolbar">
+      <div class="environment-picker" role="group" aria-label="3D environment"><span>3D ENVIRONMENT</span><div class="view-mode"><button type="button" :class="{ active: sceneEnvironment === 'vista' }" :aria-pressed="sceneEnvironment === 'vista'" @click="changeEnvironment('vista')">◈ Calibration vista</button><button type="button" :class="{ active: sceneEnvironment === 'yacht' }" :aria-pressed="sceneEnvironment === 'yacht'" @click="changeEnvironment('yacht')">⌁ Mega yacht</button></div></div>
+      <label v-if="sceneEnvironment === 'yacht'" class="yacht-location-picker">Inspect location<select :value="selectedCameraId" aria-label="Inspect yacht camera location" @change="selectCamera(($event.target as HTMLSelectElement).value, true)"><option v-for="(item, i) in cameras" :key="item.id" :value="item.id">{{ yachtMountFor(item, i).name }} · ADDR {{ item.address }}</option></select></label>
+      <div class="view-mode daylight-picker" role="group" aria-label="Time of day"><button type="button" :class="{ active: !night }" :aria-pressed="!night" @click="night = false">☀ Day</button><button type="button" :class="{ active: night }" :aria-pressed="night" @click="night = true">☾ Night</button></div>
+      <label v-if="sceneEnvironment === 'yacht'" class="wave-strength-picker">Waves <input v-model.number="waveStrength" type="range" min="0" max="2" step="0.05" aria-label="Wave strength" :aria-valuetext="waveStrength === 0 ? 'Calm' : `${Math.round(waveStrength * 100)} percent`" /><output>{{ waveStrength === 0 ? 'Calm' : `${Math.round(waveStrength * 100)}%` }}</output></label>
+      <span class="environment-note">{{ sceneEnvironment === 'yacht' ? 'Island cruise · skyline & Spinnaker Tower · 8 km visibility' : 'Original calibration targets · live camera feeds' }}</span>
+    </div>
 
     <main :class="{ 'overview-main': ['overview', 'monitors'].includes(activeSimulator) }">
       <div v-if="['camera', 'switchers'].includes(activeSimulator)" class="page-heading"><div><div class="eyebrow">IRIS SYSTEMS <span>/</span> SERIAL PROTOCOLS</div><h1>{{ activeSimulator === 'camera' ? 'Pelco-D' : 'Monitor switching' }} <span>simulator</span><span class="protocol-badge">SHARED SERIAL BUS</span></h1><p>Watch camera motion and monitor routes respond to the same command stream.</p></div><button class="button danger-outline" @click="emergencyStop"><span class="stop-square"></span> Stop all cameras</button></div>
 
-      <SimulatorOverview v-if="activeSimulator === 'overview'" id="overview-simulator" :cameras="cameras" :switchers="switchers" :entries="entries" :settings="busSettings" :pending="pending.length" :storage-error="cameraStorageError" @cameras="updateCameras" @controls="selectCamera($event, true)" @switchers="activeSimulator = 'switchers'" @stop="emergencyStop" />
+      <SimulatorOverview v-if="activeSimulator === 'overview'" id="overview-simulator" :environment="sceneEnvironment" :night="night" :wave-strength="waveStrength" :cameras="cameras" :switchers="switchers" :entries="entries" :selected-nvr-id="selectedNvrId" :settings="busSettings" :pending="pending.length" :storage-error="cameraStorageError" @cameras="updateCameras" @controls="selectCamera($event, true)" @switchers="activeSimulator = 'switchers'" @stop="emergencyStop" @clear-nvr="clearNvrLog" />
 
-      <MonitorSimulation v-if="activeSimulator === 'monitors'" id="monitor-simulator" :cameras="cameras" :switchers="switchers" :nvr="nvr" :config="nvrConfig" :entries="entries" :connected="nvrConnected" :path="nvrPath" :busy="nvrBusy" :bridge-connected="bridgeConnected" :error="nvrError" :pending="nvrPending.length" :storage-error="nvrStorageError || storageError || cameraStorageError" :defaults-restored="defaultsRestored" @reset="resetSimulationDefaults" @undo-reset="undoDefaultReset" @dismiss-reset="dismissDefaultReset" @bytes="receiveNvr($event, 'nvr-controls', true)" @config="nvrConfig = $event" @switchers="switchers = $event" @route="routeSwitcher" @serial="toggleNvrSerial" @inspect="inspectNvr" @configure-switchers="activeSimulator = 'switchers'" />
+      <MonitorSimulation v-if="activeSimulator === 'monitors'" id="monitor-simulator" :environment="sceneEnvironment" :night="night" :wave-strength="waveStrength" :cameras="cameras" :switchers="switchers" :nvr="nvr" :config="nvrConfig" :entries="entries" :connected="nvrConnected" :path="nvrPath" v-model:serial-path="nvrSerialPath" v-model:serial-baud="nvrBaudRate" :ports="ports" :refreshing="refreshingPorts" :ports-error="portsError" :busy="nvrBusy" :bridge-connected="bridgeConnected" :error="nvrError" :pending="nvrPending.length" :storage-error="nvrStorageError || storageError || cameraStorageError" :defaults-restored="defaultsRestored" @reset="resetSimulationDefaults" @undo-reset="undoDefaultReset" @dismiss-reset="dismissDefaultReset" @bytes="receiveNvr($event, 'nvr-controls', true)" @config="nvrConfig = $event" @switchers="switchers = $event" @route="routeSwitcher" @serial="toggleNvrSerial" @refresh-ports="refreshPorts" @inspect="inspectNvr" @configure-switchers="activeSimulator = 'switchers'" />
 
       <div v-show="['camera', 'switchers'].includes(activeSimulator)">
       <div class="workbench">
         <section v-show="activeSimulator === 'camera'" id="camera-simulator" class="panel visualization-panel" role="tabpanel" aria-labelledby="camera-tab">
           <div class="panel-heading"><h2><span class="small-icon">◈</span> Camera visualization</h2><select v-if="cameras.length > 1" class="camera-picker" :value="selectedCameraId" aria-label="Camera to control" @change="selectCamera(($event.target as HTMLSelectElement).value)"><option v-for="item in cameras" :key="item.id" :value="item.id">{{ item.name }} · {{ item.address }}</option></select><div class="view-actions"><label><input v-model="showFrustum" type="checkbox" /> Field of view</label><button class="icon-button" @click="scene?.resetView()" aria-label="Reset orbit view" title="Reset orbit view">↻</button></div></div>
-          <CameraScene ref="scene" :camera="camera" :show-frustum="showFrustum" />
+          <CameraScene :key="sceneEnvironment" ref="scene" :environment="sceneEnvironment" :night="night" :wave-strength="waveStrength" :cameras="cameras" :camera-id="selectedCameraId" :camera="camera" :show-frustum="showFrustum" />
           <div class="telemetry">
             <div><span>PAN ANGLE</span><strong>{{ displayPan.toFixed(1) }}<small>°</small></strong><em>{{ rates.pan.toFixed(1) }}° / s</em></div>
             <div><span>TILT ANGLE</span><strong>{{ camera.tilt.toFixed(1) }}<small>°</small></strong><em>{{ rates.tilt.toFixed(1) }}° / s</em></div>
@@ -359,8 +416,15 @@ onUnmounted(() => {
             <label class="palette-select" for="thermal-palette">Thermal palette<select id="thermal-palette" v-model="camera.thermalPalette" @change="selectThermalPalette"><option v-for="palette in thermalPalettes" :key="palette.id" :value="palette.id">{{ palette.name }}</option></select></label>
             <span class="palette-swatch" :style="{ background: paletteGradient(camera.thermalPalette) }" aria-hidden="true"></span>
             <button class="button lamp-button" :class="{ 'lamp-active': camera.lampOn }" :aria-pressed="camera.lampOn" :aria-label="camera.lampOn ? 'Turn lamp off' : 'Turn lamp on'" @click="toggleLamp"><span aria-hidden="true">☀</span> Lamp {{ camera.lampOn ? 'on' : 'off' }}</button>
+            <span class="gyro-state" role="status" :class="{ active: camera.gyroOn }" title="Pelco-D call preset 251 enables gyro; 252 disables it. Presets 250/249 trim up/down.">Gyro {{ camera.gyroOn ? 'on · horizon stabilized' : 'off · follows vessel' }}</span>
           </div>
-          <div class="camera-effects-note">The camera view uses synthetic heat values. Selecting a palette opens thermal view.</div>
+          <div class="focus-controls">
+            <span class="focus-mode">Focus <strong>{{ camera.autofocus ? 'Auto' : `Manual · ${(camera.focus * 100).toFixed(0)}%` }}</strong></span>
+            <button class="button secondary" aria-label="Hold to focus near" @pointerdown="beginHold('focus-near', $event)" @pointerup="endHold" @pointercancel="endHold" @lostpointercapture="endHold">Near</button>
+            <button class="button secondary" aria-label="Hold to focus far" @pointerdown="beginHold('focus-far', $event)" @pointerup="endHold" @pointercancel="endHold" @lostpointercapture="endHold">Far</button>
+            <button class="button secondary" :class="{ 'autofocus-active': camera.autofocus }" :aria-pressed="camera.autofocus" @click="localCommand(0, 0x2b, 0, camera.autofocus ? 1 : 0)">Auto focus</button>
+          </div>
+          <div class="camera-effects-note">Optical feeds show low-light grain and light glare. Thermal feeds use synthetic heat, sensor grain and heat bloom. Focus commands affect both views.</div>
         </section>
 
         <MonitorSwitchers v-show="activeSimulator === 'switchers'" id="switcher-simulator" role="tabpanel" aria-labelledby="switcher-tab" :switchers="switchers" :storage-error="storageError" :first-camera-id="cameras[0].id" @update="switchers = $event" @route="routeSwitcher" />
@@ -381,13 +445,7 @@ onUnmounted(() => {
               <div class="sample-buttons"><button @click="sample('right')">Pan right</button><button @click="sample('diagonal')">Pan + tilt</button><button @click="sample('zoom')">Zoom in</button><button @click="sample('stop')">Stop</button><button class="bad-sample" @click="sample('checksum')">Bad checksum</button><button class="bad-sample" @click="sample('conflict')">Conflicting bits</button></div>
             </template>
             <template v-else>
-              <div class="field-label"><label for="serial-path">SERIAL DEVICE</label><button class="text-button" @click="refreshPorts">↻ Refresh</button></div>
-              <input id="serial-path" v-model="serialPath" list="serial-ports" placeholder="/dev/cu.usbserial… or /dev/ttys…" :disabled="serialConnected || busy" />
-              <datalist id="serial-ports"><option v-for="port in ports" :key="port.path" :value="port.path">{{ port.manufacturer }}</option></datalist>
-              <div class="serial-options"><label for="baud-rate">Baud rate<select id="baud-rate" v-model.number="baudRate" :disabled="serialConnected || busy"><option v-for="rate in [2400, 4800, 9600, 19200, 38400, 57600, 115200]" :key="rate" :value="rate">{{ rate }}</option></select></label><div><span>FORMAT</span><strong>8N1</strong><small>8 data · no parity · 1 stop</small></div></div>
-              <button class="button primary send-button" :disabled="busy || !bridgeConnected || (!serialConnected && !serialPath)" @click="toggleSerial">{{ busy ? 'Connecting…' : serialConnected ? 'Disconnect serial' : 'Connect serial' }} <span>⌁</span></button>
-              <p v-if="serialConnected" class="connected-device"><i class="status-dot"></i> Receiving from {{ connectedPath }}</p>
-              <p v-if="connectionError" class="error-message" role="alert">{{ connectionError }}</p>
+              <SerialConnection line="camera" :ports="ports" v-model:path="serialPath" v-model:baud-rate="baudRate" :connected="serialConnected" :connected-path="connectedPath" :busy="busy" :bridge-connected="bridgeConnected" :error="connectionError" :refreshing="refreshingPorts" :ports-error="portsError" @toggle="toggleSerial" @refresh="refreshPorts" />
               <div class="serial-note">Connect a USB serial adapter, or enter a virtual serial port path to receive bytes from your controller. Camera and switcher traffic share one parser. The bridge receives only; it sends no device replies.</div>
               <details class="api-details"><summary>Send bytes from another app</summary><p>While this UI is open, POST binary bytes to <code>http://127.0.0.1:4311/api/bytes</code> with <code>Content-Type: application/octet-stream</code>, or JSON <code>{"hex":"FF 01 00 02 20 00 23"}</code>.</p></details>
             </template>
@@ -396,22 +454,14 @@ onUnmounted(() => {
         </aside>
       </div>
 
-      <SharedBusPanel v-if="selected?.protocol !== 'nvr'" :settings="busSettings" :switchers="switchers" :deliveries="selected?.deliveries ?? []" :serial-connected="serialConnected" :pending="pending.length" :command="selected?.description ?? ''" @baud="busBaudRate = $event" @camera-baud="cameraBaudRate = $event" @fault="injectFault" />
+      <SharedBusPanel :settings="busSettings" :switchers="switchers" :deliveries="selected?.deliveries ?? []" :serial-connected="serialConnected" :pending="pending.length" :command="selected?.description ?? ''" @baud="busBaudRate = $event" @camera-baud="cameraBaudRate = $event" @fault="injectFault" />
 
-      <section class="panel inspector-panel">
-        <div class="panel-heading"><h2><span class="small-icon">▤</span> {{ selected?.protocol === 'nvr' ? 'NVR packet inspector · separate serial line' : 'Packet inspector' }}</h2><div v-if="selected" class="packet-verdict" :class="entryTone(selected)"><i class="status-dot"></i>{{ selected.result }}</div><span v-else class="muted small">Waiting for a command</span></div>
-        <div class="inspector-body">
-          <div class="byte-grid" :class="{ 'nvr-bytes': selected?.protocol === 'nvr' }"><div v-for="(field, index) in inspectorFields" :key="field" class="byte-cell" :class="{ 'byte-error': selected?.issues.some(i => i.severity === 'error' && i.bytes.includes(index)), 'byte-warning': selected?.issues.some(i => i.severity === 'warning' && i.bytes.includes(index)) }"><span class="byte-index">{{ String(index + 1).padStart(2, '0') }} <span>{{ field }}</span></span><strong>{{ selected?.bytes[index] === undefined ? '—' : hex(selected.bytes[index]) }}</strong><span class="binary">{{ selected?.bytes[index]?.toString(2).padStart(8, '0') ?? '········' }}</span><span class="byte-note">{{ fieldNotes[index] }}</span></div></div>
-          <div class="decoded-line"><span>DECODED</span><strong>{{ selected?.description ?? 'Send a command to inspect its bytes and see each device respond.' }}</strong><span v-if="selected?.packet" class="expected-checksum">Expected checksum <code>{{ hex(selected.packet.checksum) }}</code></span></div>
-          <div v-if="selected?.issues.length" class="issues-list"><div v-for="(issue, index) in selected.issues" :key="index" class="issue" :class="issue.severity"><span>{{ issue.severity === 'error' ? '×' : issue.severity === 'warning' ? '!' : 'i' }}</span><p>{{ issue.message }}</p></div></div>
-          <div v-else-if="selected" class="valid-note"><span>✓</span> All bytes valid. {{ selected.bytes.length }}-byte frame verified.</div>
-        </div>
-      </section>
+      <PacketInspector :entry="selected" :heading="activeSimulator === 'camera' ? `Pelco-D packet inspector · ADDR ${address}` : undefined" />
 
       <section class="panel capture-panel">
-        <div class="panel-heading"><h2><span class="small-icon">≡</span> Command capture <span class="count-badge">{{ totalFrames }}</span></h2><div class="capture-actions"><div class="filter-switch"><button :class="{ active: filter === 'all' }" @click="filter = 'all'">All commands</button><button :class="{ active: filter === 'issues' }" @click="filter = 'issues'">Issues only</button></div><button class="text-button" :disabled="!entries.length" @click="exportLog">↓ Export</button><button class="text-button" @click="clearLog">Clear</button></div></div>
-        <div class="capture-table"><div class="capture-row table-head"><span>TIME</span><span>SOURCE</span><span>RAW BYTES</span><span>COMMAND</span><span>RESULT</span></div><button v-for="entry in visibleEntries" :key="entry.id" class="capture-row" :class="{ selected: selected?.id === entry.id }" @click="selected = entry"><span class="capture-time">{{ entry.time }}</span><span class="source-tag" :title="entry.source">{{ entry.source }}</span><code>{{ hexBytes(entry.bytes.slice(0, 30)) }}{{ entry.bytes.length > 30 ? ' …' : '' }}</code><span class="capture-description">{{ entry.description }}</span><span class="result-tag" :class="entryTone(entry)">{{ entry.result }}</span></button><div v-if="!visibleEntries.length" class="capture-empty"><span>⌁</span><strong>{{ entries.length ? 'No issues in this capture' : 'Your command stream starts here' }}</strong><p>{{ entries.length ? 'Change the filter to see all received commands.' : 'Send hex bytes or connect a serial device. Every received command will appear here.' }}</p></div></div>
-        <div class="capture-footer"><span><i class="status-dot" :class="{ offline: !serialConnected }"></i>{{ serialConnected ? 'Listening on serial' : 'Manual input ready' }}<span v-if="pending.length"> · {{ pending.length }} byte(s) awaiting frame completion</span></span><div><span>{{ totalBytes }} bytes</span><span>{{ totalFrames }} frames</span><span :class="{ 'error-text': totalRejected > 0 }">{{ totalRejected }} rejected</span><span>Latest 200 entries</span></div></div>
+        <div class="panel-heading"><h2><span class="small-icon">≡</span> {{ activeSimulator === 'camera' ? `Pelco-D history · ADDR ${address}` : 'Pelco-D command capture' }} <span class="count-badge">{{ captureEntries.length }}</span></h2><div class="capture-actions"><div class="filter-switch"><button :class="{ active: filter === 'all' }" @click="filter = 'all'">All commands</button><button :class="{ active: filter === 'issues' }" @click="filter = 'issues'">Issues only</button></div><button class="text-button" :disabled="!captureEntries.length" @click="exportLog">↓ Export</button><button class="text-button" :aria-label="activeSimulator === 'camera' ? 'Clear this camera history' : 'Clear Pelco-D history'" @click="clearLog">Clear</button></div></div>
+        <div class="capture-table"><div class="capture-row table-head"><span>TIME</span><span>SOURCE</span><span>RAW BYTES</span><span>COMMAND</span><span>RESULT</span></div><button v-for="entry in visibleEntries" :key="entry.id" class="capture-row" :class="{ selected: selected?.id === entry.id }" @click="selected = entry"><span class="capture-time">{{ entry.time }}</span><span class="source-tag" :title="entry.source">{{ entry.source }}</span><code>{{ hexBytes(entry.bytes.slice(0, 30)) }}{{ entry.bytes.length > 30 ? ' …' : '' }}</code><span class="capture-description">{{ entry.description }}</span><span class="result-tag" :class="entryTone(entry)">{{ entry.result }}</span></button><div v-if="!visibleEntries.length" class="capture-empty"><span>⌁</span><strong>{{ captureEntries.length ? 'No issues in this capture' : activeSimulator === 'camera' ? `No commands for camera ${address}` : 'Your Pelco-D stream starts here' }}</strong><p>{{ captureEntries.length ? 'Change the filter to see all commands in this history.' : activeSimulator === 'camera' ? `Pelco-D commands addressed to ${address} appear here. NVR history is on the Overview page.` : 'Pelco-D commands on the shared camera and switcher bus appear here.' }}</p></div></div>
+        <div class="capture-footer"><span><i class="status-dot" :class="{ offline: !serialConnected }"></i>{{ serialConnected ? 'Listening on serial' : 'Manual input ready' }}<span v-if="pending.length"> · {{ pending.length }} byte(s) awaiting frame completion</span></span><div><span>{{ captureStats.bytes }} bytes</span><span>{{ captureStats.frames }} frames</span><span :class="{ 'error-text': captureStats.rejected > 0 }">{{ captureStats.rejected }} rejected</span><span>{{ captureEntries.length }} retained{{ activeSimulator === 'camera' ? ` · ADDR ${address}` : ' · Pelco-D bus' }}</span></div></div>
       </section>
 
       <details class="panel settings-panel"><summary>Simulation settings <span>Protocol, speeds & presets</span></summary><div class="settings-content"><label>Protocol profile<select v-model.number="turboByte" @change="emergencyStop"><option :value="255">IRIS / legacy — FF turbo</option><option :value="64">Pelco v5.2.2 — 40 turbo</option></select></label><label>Control pan speed <span>{{ hex(panSpeed === 64 ? turboByte : panSpeed) }}</span><input v-model.number="panSpeed" type="range" min="0" max="64" /></label><label>Control tilt speed <span>{{ hex(tiltSpeed) }}</span><input v-model.number="tiltSpeed" type="range" min="0" max="63" /></label><label>Motion watchdog<select v-model.number="profile.watchdogMs"><option :value="15000">15 seconds</option><option :value="2000">2 seconds</option><option :value="0">Disabled — until stop command</option></select></label><div class="preset-settings"><label for="preset">Preset (1–32)</label><input id="preset" v-model.number="preset" type="number" min="1" max="32" @change="preset = Math.min(32, Math.max(1, Math.round(preset || 1)))" /><div><button class="button secondary" @click="localCommand(0, 3, 0, preset)">Save</button><button class="button secondary" @click="localCommand(0, 7, 0, preset)">Call</button><button class="text-button" @click="localCommand(0, 5, 0, preset)">Clear</button></div><small>{{ camera.presets.size }} saved · Held in memory for this camera address</small></div></div><p class="settings-footnote">Pelco-D: FF sync · 8-bit sum checksum · {{ hex(turboByte) }} turbo · speed 00 is slow motion. Supports standard motion, lens flags, auto focus, power, generic auto scan, absolute pan/tilt, display zero, presets 1–32, flip (33), and zero pan (34), plus IRIS thermal palette/mode presets and lamp control (90 → 3/4). Extended commands outside this set are flagged. This is a receive-only visual simulator; it does not implement protocol replies. <a href="https://www.ptzprotocols.com/1%20Pelco%20PTZ%20Protocols/D/DPprotoEPDF.pdf" target="_blank" rel="noopener noreferrer">Protocol reference ↗</a></p></details>

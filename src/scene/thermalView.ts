@@ -1,73 +1,79 @@
 import * as THREE from 'three'
-import { palettePixels } from '../simulation/thermalPalettes'
+import { createCameraEffects, type CameraEffectsSettings } from './cameraEffects'
+import { oceanWaveShader } from './ocean'
 
 export interface HeatSource { object: THREE.Object3D; heat: number }
 
-export function createThermalView(sources: HeatSource[]) {
+export function createThermalView(sources: HeatSource[], sky?: THREE.Object3D) {
   const thermalScene = new THREE.Scene()
   thermalScene.background = new THREE.Color().setRGB(0.07, 0.07, 0.07)
-  const materials: THREE.ShaderMaterial[] = []
+  if (sky) thermalScene.add(sky)
+  const materials = new Map<string, THREE.ShaderMaterial>()
+  const animated: { original: THREE.Object3D; clone: THREE.Object3D }[] = []
   for (const source of sources) {
     const object = source.object.clone(true)
+    const originals: THREE.Object3D[] = []; source.object.traverse(child => originals.push(child))
+    let index = 0
     object.traverse(child => {
+      const original = originals[index++]
+      if (original.userData.thermalHidden) child.visible = false
+      if (original.userData.thermalAnimated) animated.push({ original, clone: child })
+      if (original instanceof THREE.InstancedMesh && child instanceof THREE.InstancedMesh) {
+        // Optical and thermal scenes share live per-vessel/buoy transforms.
+        child.instanceMatrix = original.instanceMatrix; child.boundingSphere = original.boundingSphere
+      }
       if (!(child instanceof THREE.Mesh)) return
-      const material = new THREE.ShaderMaterial({
-        uniforms: { heat: { value: child.userData.heat ?? source.heat } },
-        vertexShader: `varying vec3 surfaceNormal; varying vec3 worldPosition;
+      const heat = child.userData.heat ?? source.heat
+      const waveTime = original.userData.waveTime as { value: number } | undefined
+      const key = `${heat}:${waveTime ? 'ocean' : 'solid'}`
+      let material = materials.get(key)
+      if (!material) material = new THREE.ShaderMaterial({
+        uniforms: { heat: { value: heat }, ...(waveTime ? { oceanTime: waveTime, oceanStrength: original.userData.waveStrength, oceanOrigin: original.userData.waveOrigin, vesselCourse: original.userData.vesselCourse } : {}) },
+        side: THREE.DoubleSide,
+        vertexShader: `${waveTime ? `uniform float oceanTime; uniform vec2 oceanOrigin; ${oceanWaveShader}` : ''}
+          #include <common>
+          #include <logdepthbuf_pars_vertex>
+          varying vec3 surfaceNormal; varying vec3 worldPosition;
           void main() {
-            vec4 world = modelMatrix * vec4(position, 1.0);
-            surfaceNormal = normalize(mat3(modelMatrix) * normal); worldPosition = world.xyz;
+            vec3 point = position; vec3 normalDirection = normal;
+            ${waveTime ? 'vec3 wave = oceanWaves(position.xz + oceanOrigin, oceanTime); point.y += wave.x; normalDirection = normalize(vec3(-wave.y, 1.0, -wave.z));' : ''}
+            #ifdef USE_INSTANCING
+              point = (instanceMatrix * vec4(point, 1.0)).xyz;
+              normalDirection = mat3(instanceMatrix) * normalDirection;
+            #endif
+            vec4 world = modelMatrix * vec4(point, 1.0);
+            surfaceNormal = normalize(mat3(modelMatrix) * normalDirection); worldPosition = world.xyz;
             gl_Position = projectionMatrix * viewMatrix * world;
+            #include <logdepthbuf_vertex>
           }`,
         fragmentShader: `uniform float heat; varying vec3 surfaceNormal; varying vec3 worldPosition;
+          #include <logdepthbuf_pars_fragment>
+          ${waveTime ? 'uniform vec2 oceanOrigin; uniform float vesselCourse;' : ''}
           void main() {
+            ${waveTime ? `vec2 relative = worldPosition.xz - oceanOrigin;
+              vec2 aboard = vec2(relative.x * cos(vesselCourse) - relative.y * sin(vesselCourse), relative.x * sin(vesselCourse) + relative.y * cos(vesselCourse));
+              if (abs(aboard.x) < 5.0 && aboard.y > -12.0 && aboard.y < 0.0) discard;` : ''}
             float detail = 0.012 * sin(worldPosition.x * 2.5 + worldPosition.y * 3.0);
             float value = clamp(heat + detail + 0.035 * dot(normalize(surfaceNormal), normalize(vec3(0.4, 0.8, 0.5))), 0.0, 1.0);
             gl_FragColor = vec4(vec3(value), 1.0);
+            #include <logdepthbuf_fragment>
           }`,
       })
-      child.material = material; materials.push(material)
+      child.material = material; materials.set(key, material)
     })
     thermalScene.add(object)
   }
-  const target = new THREE.WebGLRenderTarget(280, 158, { depthBuffer: true })
-  const data = palettePixels('white-hot')
-  const paletteTexture = new THREE.DataTexture(data, 256, 1, THREE.RGBAFormat)
-  paletteTexture.minFilter = THREE.LinearFilter; paletteTexture.magFilter = THREE.LinearFilter
-  paletteTexture.needsUpdate = true
-  const quadMaterial = new THREE.ShaderMaterial({
-    uniforms: { heatImage: { value: target.texture }, palette: { value: paletteTexture }, inverted: { value: false } },
-    vertexShader: `varying vec2 imageUv; void main() { imageUv = uv; gl_Position = vec4(position.xy, 0.0, 1.0); }`,
-    fragmentShader: `uniform sampler2D heatImage; uniform sampler2D palette; uniform bool inverted; varying vec2 imageUv;
-      void main() {
-        float heat = texture2D(heatImage, imageUv).r;
-        if (inverted) heat = 1.0 - heat;
-        gl_FragColor = vec4(texture2D(palette, vec2(clamp(heat, 0.0, 1.0), 0.5)).rgb, 1.0);
-      }`,
-    depthTest: false, depthWrite: false,
-  })
-  const quadScene = new THREE.Scene()
-  const quad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), quadMaterial)
-  quad.frustumCulled = false; quadScene.add(quad)
-  const quadCamera = new THREE.Camera()
-  const savedViewport = new THREE.Vector4()
-  let selectedPalette = 'white-hot'
+  const effects = createCameraEffects(true)
   return {
-    render(renderer: THREE.WebGLRenderer, camera: THREE.Camera, palette: string, inverted: boolean, width: number, height: number) {
-      if (palette !== selectedPalette) { data.set(palettePixels(palette)); paletteTexture.needsUpdate = true; selectedPalette = palette }
-      quadMaterial.uniforms.inverted.value = inverted
-      if (target.width !== width || target.height !== height) target.setSize(width, height)
-      const previousTarget = renderer.getRenderTarget()
-      const previousScissor = renderer.getScissorTest()
-      renderer.getViewport(savedViewport)
-      renderer.setRenderTarget(target); renderer.setScissorTest(false)
-      renderer.setViewport(0, 0, width, height); renderer.render(thermalScene, camera)
-      renderer.setRenderTarget(previousTarget); renderer.setViewport(savedViewport)
-      renderer.setScissorTest(previousScissor); renderer.render(quadScene, quadCamera)
+    render(renderer: THREE.WebGLRenderer, camera: THREE.PerspectiveCamera, settings: CameraEffectsSettings, width: number, height: number) {
+      for (const { original, clone } of animated) {
+        clone.position.copy(original.position); clone.quaternion.copy(original.quaternion); clone.scale.copy(original.scale)
+      }
+      effects.render(renderer, thermalScene, camera, settings, width, height)
     },
     dispose() {
-      for (const material of materials) material.dispose()
-      target.dispose(); paletteTexture.dispose(); quad.geometry.dispose(); quadMaterial.dispose()
+      for (const material of materials.values()) material.dispose()
+      effects.dispose()
     },
   }
 }

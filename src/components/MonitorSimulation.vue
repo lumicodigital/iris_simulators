@@ -1,6 +1,9 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import CameraScene from './CameraScene.vue'
+import type { SceneEnvironment } from '../simulation/environment'
+import SerialConnection from './SerialConnection.vue'
+import type { SerialPortInfo } from '../simulation/serialPorts'
 import { createMonitorVideo } from '../scene/monitorVideo'
 import { hexBytes, parseHex } from '../protocol/pelcoD'
 import { makeNvrChannel, makeNvrKey, splitKey } from '../protocol/nvr'
@@ -10,8 +13,8 @@ import { baudRates, type Switcher, type VideoSource } from '../simulation/switch
 import { inputSource, monitorOutputs } from '../simulation/videoRouting'
 import type { CaptureEntry } from '../simulation/history'
 
-const props = defineProps<{ cameras: SimulatedCamera[]; switchers: Switcher[]; nvr: NvrState; config: NvrConfig; entries: CaptureEntry[]; connected: boolean; path: string; busy: boolean; bridgeConnected: boolean; error: string; pending: number; storageError: string; defaultsRestored: boolean }>()
-const emit = defineEmits<{ bytes: [bytes: number[], complete: boolean]; config: [config: NvrConfig]; switchers: [devices: Switcher[]]; route: [device: Switcher, output: number, input: number]; serial: [path: string, baudRate: number]; inspect: [entry: CaptureEntry]; configureSwitchers: []; reset: []; undoReset: []; dismissReset: [] }>()
+const props = defineProps<{ environment: SceneEnvironment; night: boolean; waveStrength: number; cameras: SimulatedCamera[]; switchers: Switcher[]; nvr: NvrState; config: NvrConfig; entries: CaptureEntry[]; connected: boolean; path: string; busy: boolean; bridgeConnected: boolean; error: string; pending: number; storageError: string; defaultsRestored: boolean; serialPath: string; serialBaud: number; ports: SerialPortInfo[]; refreshing: boolean; portsError: string }>()
+const emit = defineEmits<{ bytes: [bytes: number[], complete: boolean]; config: [config: NvrConfig]; switchers: [devices: Switcher[]]; route: [device: Switcher, output: number, input: number]; serial: [path: string, baudRate: number]; inspect: [entry: CaptureEntry]; configureSwitchers: []; reset: []; undoReset: []; dismissReset: []; 'update:serialPath': [value: string]; 'update:serialBaud': [value: number]; refreshPorts: [] }>()
 const page = ref(0)
 const outputs = computed(() => monitorOutputs(props.switchers, props.cameras))
 const pages = computed(() => Math.max(1, Math.ceil(outputs.value.length / 4)))
@@ -22,7 +25,6 @@ const selectedChannel = ref(1)
 const settingsOpen = ref(false)
 const selectedSwitcher = ref('')
 const device = computed(() => props.switchers.find(item => item.id === selectedSwitcher.value) ?? props.switchers[0])
-const serialPath = ref(''); const serialBaud = ref(9600)
 const raw = ref('AA 2B DF 01 AA 2B DF 00'); const rawError = ref('')
 const recentNvr = computed(() => props.entries.filter(item => item.protocol === 'nvr').slice(0, 8))
 const canvases = new Map<string, HTMLCanvasElement>()
@@ -33,7 +35,7 @@ function paint() {
   paintFrame = 0
   if (!video) return
   video.renderNvr(props.nvr, props.config, props.cameras)
-  video.renderSources()
+  video.renderSources(props.environment)
   visible.value.forEach(output => { const canvas = canvases.get(output.key); if (canvas) video!.renderMonitor(canvas, output, props.cameras) })
 }
 function queuePaint() { if (!paintFrame) paintFrame = requestAnimationFrame(paint) }
@@ -112,8 +114,8 @@ onUnmounted(() => { clearInterval(sourceTimer); cancelAnimationFrame(paintFrame)
       <p v-if="storageError" class="error-message" role="alert">{{ storageError }}</p>
     </div>
 
-    <details class="panel nvr-serial"><summary>NVR serial input <span>{{ connected ? path : 'API / manual bytes ready' }}{{ pending ? ` · ${pending} pending bytes` : '' }}</span></summary><div class="nvr-serial-grid"><section><h3>Dedicated serial port</h3><label>NVR serial device<input v-model="serialPath" placeholder="/dev/cu.usbserial…" :disabled="connected || busy" /></label><label>Line baud rate<select v-model.number="serialBaud" :disabled="connected || busy"><option v-for="rate in baudRates" :key="rate" :value="rate">{{ rate }}</option></select></label><button class="button secondary" :disabled="busy || !bridgeConnected || (!connected && !serialPath)" @click="emit('serial', serialPath, serialBaud)">{{ busy ? 'Connecting…' : connected ? 'Disconnect NVR serial' : 'Connect NVR serial' }}</button><p v-if="error" class="error-message" role="alert">{{ error }}</p><p>NVR uses its own AA key protocol and 8N1 serial line. Cameras and switchers continue sharing the Pelco-D bus.</p></section><section><h3>Send NVR bytes</h3><label>NVR command bytes<textarea v-model="raw" rows="3" spellcheck="false"></textarea></label><button class="button primary" @click="submitRaw">Send NVR bytes</button><p v-if="rawError" class="error-message" role="alert">{{ rawError }}</p><p>Four bytes per key event: AA · key A · key B · 01 press / 00 release. Only the press changes the display.</p><p>POST binary bytes or JSON <code>{"hex":"AA 2B DF 01 AA 2B DF 00"}</code> to <code>http://127.0.0.1:4311/api/nvr/bytes</code>.</p></section></div><div v-if="recentNvr.length" class="nvr-capture"><button v-for="entry in recentNvr" :key="entry.id" @click="emit('inspect', entry)"><time>{{ entry.time }}</time><code>{{ hexBytes(entry.bytes) }}</code><span>{{ entry.description }}</span><strong :class="{ 'error-text': entry.issues.some(issue => issue.severity === 'error') }">{{ entry.result }}</strong></button></div></details>
-    <div class="video-engines" aria-hidden="true"><CameraScene v-for="camera in cameras" :key="camera.id" :camera="camera.state" :show-frustum="false" compact video-only @video-frame="capture(camera.id, $event)" /></div>
+    <details class="panel nvr-serial"><summary>NVR serial input <span>{{ connected ? path : 'API / manual bytes ready' }}{{ pending ? ` · ${pending} pending bytes` : '' }}</span></summary><div class="nvr-serial-grid"><section><h3>Dedicated serial port</h3><SerialConnection line="nvr" :ports="ports" :path="serialPath" :baud-rate="serialBaud" :connected="connected" :connected-path="path" :busy="busy" :bridge-connected="bridgeConnected" :error="error" :refreshing="refreshing" :ports-error="portsError" @update:path="emit('update:serialPath', $event)" @update:baud-rate="emit('update:serialBaud', $event)" @toggle="(path, baud) => emit('serial', path, baud)" @refresh="emit('refreshPorts')" /><p>NVR uses its own AA key protocol and 8N1 serial line. Cameras and switchers continue sharing the Pelco-D bus.</p></section><section><h3>Send NVR bytes</h3><label>NVR command bytes<textarea v-model="raw" rows="3" spellcheck="false"></textarea></label><button class="button primary" @click="submitRaw">Send NVR bytes</button><p v-if="rawError" class="error-message" role="alert">{{ rawError }}</p><p>Four bytes per key event: AA · key A · key B · 01 press / 00 release. Only the press changes the display.</p><p>POST binary bytes or JSON <code>{"hex":"AA 2B DF 01 AA 2B DF 00"}</code> to <code>http://127.0.0.1:4311/api/nvr/bytes</code>.</p></section></div><div v-if="recentNvr.length" class="nvr-capture"><button v-for="entry in recentNvr" :key="entry.id" @click="emit('inspect', entry)"><time>{{ entry.time }}</time><code>{{ hexBytes(entry.bytes) }}</code><span>{{ entry.description }}</span><strong :class="{ 'error-text': entry.issues.some(issue => issue.severity === 'error') }">{{ entry.result }}</strong></button></div></details>
+    <div class="video-engines" aria-hidden="true"><CameraScene v-for="camera in cameras" :key="`${environment}-${camera.id}`" :environment="environment" :night="night" :wave-strength="waveStrength" :cameras="cameras" :camera-id="camera.id" :camera="camera.state" :show-frustum="false" compact video-only @video-frame="capture(camera.id, $event)" /></div>
     <span class="sr-only" role="status">{{ config.name }} {{ layoutLabel }}. Channels {{ nvrChannels(nvr).join(', ') }}.</span>
   </section>
 </template>

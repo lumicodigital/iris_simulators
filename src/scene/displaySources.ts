@@ -1,51 +1,107 @@
-export function drawRadar(ctx: CanvasRenderingContext2D, seconds: number) {
+import { cargoPose, cargoRoutes, coastalIslands, islandEdge, islandBridge, spinnakerTower, radarBearing, radarContacts, trafficFleet, trafficPose, yachtPose, yachtCruiseDuration } from '../simulation/maritime'
+import type { SceneEnvironment } from '../simulation/environment'
+
+export function drawRadar(ctx: CanvasRenderingContext2D, seconds: number, environment: SceneEnvironment = 'yacht') {
+  const active = environment === 'yacht'
+  const contacts = active ? radarContacts(seconds) : []
+  const own = active ? yachtPose(seconds) : { x: 0, z: 0, yaw: 0, speed: 0 }
+  const ships = contacts.filter(item => item.kind === 'ship')
+  const shipLabels = new Map(ships.map((ship, i) => [ship.name, `C${i + 1}`]))
+  const chartX = (x: number) => -(x - own.x) * scale
+  const chartY = (z: number) => -(z - own.z) * scale
+  const range = 926; const radius = 294; const scale = radius / range
   ctx.fillStyle = '#020d0c'; ctx.fillRect(0, 0, 1280, 720)
-  ctx.font = '500 23px ui-monospace, monospace'; ctx.fillStyle = '#82dcbd'
+  ctx.textAlign = 'left'; ctx.font = '500 23px ui-monospace, monospace'; ctx.fillStyle = '#82dcbd'
   ctx.fillText('RADAR / CHART PLOTTER', 28, 40)
   ctx.font = '18px ui-monospace, monospace'; ctx.fillStyle = '#467f70'
-  ctx.fillText('HEAD UP    RANGE 2.0 NM', 28, 68)
-  const x = 590; const y = 385; const radius = 294
-  ctx.save(); ctx.translate(x, y)
+  ctx.fillText(`NORTH UP    RANGE 0.5 NM    ${active ? 'LIVE YACHT SCENE' : 'CALIBRATION VISTA'}`, 28, 68)
+  ctx.save(); ctx.translate(590, 385)
   ctx.strokeStyle = '#164d3a'; ctx.lineWidth = 1.5
   for (let i = 1; i <= 4; i++) { ctx.beginPath(); ctx.arc(0, 0, radius * i / 4, 0, Math.PI * 2); ctx.stroke() }
   for (let bearing = 0; bearing < 360; bearing += 10) {
-    const a = (bearing - 90) * Math.PI / 180
-    ctx.beginPath(); ctx.moveTo(Math.cos(a) * (radius - (bearing % 30 ? 7 : 15)), Math.sin(a) * (radius - (bearing % 30 ? 7 : 15)))
-    ctx.lineTo(Math.cos(a) * radius, Math.sin(a) * radius); ctx.stroke()
+    const angle = (bearing - 90) * Math.PI / 180
+    ctx.beginPath(); ctx.moveTo(Math.cos(angle) * (radius - (bearing % 30 ? 7 : 15)), Math.sin(angle) * (radius - (bearing % 30 ? 7 : 15)))
+    ctx.lineTo(Math.cos(angle) * radius, Math.sin(angle) * radius); ctx.stroke()
     if (bearing % 30 === 0) {
       ctx.textAlign = 'center'; ctx.font = '17px ui-monospace, monospace'; ctx.fillStyle = '#72a58c'
-      ctx.fillText(bearing === 0 ? 'N' : String(bearing).padStart(3, '0'), Math.cos(a) * (radius + 23), Math.sin(a) * (radius + 23) + 6)
+      ctx.fillText(bearing === 0 ? 'N' : String(bearing).padStart(3, '0'), Math.cos(angle) * (radius + 23), Math.sin(angle) * (radius + 23) + 6)
     }
   }
-  ctx.beginPath(); ctx.rect(-radius - 1, -radius - 1, 2 * radius + 2, 2 * radius + 2); ctx.clip()
+  ctx.beginPath(); ctx.arc(0, 0, radius, 0, Math.PI * 2); ctx.clip()
   ctx.strokeStyle = '#194334'; ctx.setLineDash([5, 7])
   ctx.beginPath(); ctx.moveTo(-radius, 0); ctx.lineTo(radius, 0); ctx.moveTo(0, -radius); ctx.lineTo(0, radius); ctx.stroke(); ctx.setLineDash([])
-  // A chart shoreline and harbor returns, distinct from the simulated camera feed.
-  ctx.fillStyle = '#2c754d'; ctx.strokeStyle = '#68c483'; ctx.lineWidth = 2
-  ctx.beginPath(); ctx.moveTo(215, -245); ctx.lineTo(165, -180); ctx.lineTo(196, -137); ctx.lineTo(159, -92); ctx.lineTo(191, -35); ctx.lineTo(178, 18); ctx.lineTo(225, 65); ctx.lineTo(234, 120); ctx.lineTo(295, 145); ctx.lineTo(295, -295); ctx.closePath(); ctx.fill(); ctx.stroke()
-  const angle = seconds * Math.PI / 2 - Math.PI / 2
-  for (let i = 40; i >= 0; i--) {
-    ctx.fillStyle = `rgba(85,255,128,${0.0015 * (40 - i)})`
-    ctx.beginPath(); ctx.moveTo(0, 0); ctx.arc(0, 0, radius, angle - i * .011, angle - (i - 1) * .011); ctx.closePath(); ctx.fill()
+  if (active) {
+    // This coastline uses the same irregular island outlines as the 3D terrain.
+    for (const island of coastalIslands) {
+      ctx.beginPath()
+      for (let i = 0; i <= 64; i++) {
+        const angle = i / 64 * Math.PI * 2; const edge = islandEdge(angle) * 0.96
+        const x = chartX(island.x + Math.cos(angle) * island.rx * edge)
+        const y = chartY(island.z + Math.sin(angle) * island.rz * edge)
+        if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y)
+      }
+      ctx.closePath(); ctx.fillStyle = '#244c36'; ctx.strokeStyle = '#68a57c'; ctx.fill(); ctx.stroke()
+    }
+    ctx.strokeStyle = '#84aab0'; ctx.lineWidth = 3
+    ctx.beginPath(); ctx.moveTo(chartX(islandBridge.from.x), chartY(islandBridge.from.z)); ctx.lineTo(chartX(islandBridge.to.x), chartY(islandBridge.to.z)); ctx.stroke()
+    ctx.fillStyle = '#bdd5dd'; ctx.fillRect(chartX(spinnakerTower.x) - 3, chartY(spinnakerTower.z) - 3, 6, 6)
+    ctx.font = '13px ui-monospace, monospace'; ctx.textAlign = 'left'; ctx.fillText('Spinnaker', chartX(spinnakerTower.x) + 8, chartY(spinnakerTower.z) - 6)
+    ctx.strokeStyle = '#438c8a'; ctx.lineWidth = 1.5; ctx.setLineDash([6, 8]); ctx.beginPath()
+    for (let i = 0; i <= 360; i++) { const pose = yachtPose(i / 360 * yachtCruiseDuration); if (!i) ctx.moveTo(chartX(pose.x), chartY(pose.z)); else ctx.lineTo(chartX(pose.x), chartY(pose.z)) }
+    ctx.stroke(); ctx.setLineDash([])
+    // Position history is sampled from the same paths, so trails survive view changes.
+    for (const route of cargoRoutes) for (let age = 10; age <= 90; age += 10) {
+      const pose = cargoPose(route, seconds - age)
+      ctx.fillStyle = `rgba(121,220,159,${0.45 * (1 - age / 100)})`
+      ctx.beginPath(); ctx.arc(chartX(pose.x), chartY(pose.z), 2, 0, Math.PI * 2); ctx.fill()
+    }
+    for (const vessel of trafficFleet) for (let age = 20; age <= 80; age += 20) {
+      const pose = trafficPose(vessel, seconds - age)
+      if (Math.hypot(pose.x - own.x, pose.z - own.z) > range) continue
+      ctx.fillStyle = `rgba(121,220,159,${0.35 * (1 - age / 100)})`; ctx.beginPath(); ctx.arc(chartX(pose.x), chartY(pose.z), 1.5, 0, Math.PI * 2); ctx.fill()
+    }
   }
-  ctx.strokeStyle = '#77f3a7'; ctx.lineWidth = 2; ctx.beginPath(); ctx.moveTo(0, 0); ctx.lineTo(Math.cos(angle) * radius, Math.sin(angle) * radius); ctx.stroke()
-  const targets = [[-126, -153], [65, -208], [-201, 88], [87, 119], [120, -78]]
-  targets.forEach(([tx, ty], index) => {
-    const drift = Math.sin(seconds * .1 + index) * 6
-    ctx.fillStyle = '#9bf8a2'; ctx.shadowColor = '#62fd88'; ctx.shadowBlur = 8
-    ctx.beginPath(); ctx.arc(tx + drift, ty, 4, 0, Math.PI * 2); ctx.fill(); ctx.shadowBlur = 0
-    ctx.strokeStyle = '#588562'; ctx.strokeRect(tx + drift - 10, ty - 10, 20, 20)
-    ctx.font = '15px ui-monospace, monospace'; ctx.fillStyle = '#82b99b'; ctx.textAlign = 'left'; ctx.fillText(`T${index + 1}`, tx + drift + 14, ty - 8)
-  })
-  ctx.fillStyle = '#d1fbe4'; ctx.beginPath(); ctx.moveTo(0, -12); ctx.lineTo(7, 9); ctx.lineTo(0, 5); ctx.lineTo(-7, 9); ctx.closePath(); ctx.fill()
+  const sweep = seconds * Math.PI / 2 - Math.PI / 2
+  for (let i = 40; i >= 0; i--) {
+    ctx.fillStyle = `rgba(85,255,128,${0.0011 * (40 - i)})`
+    ctx.beginPath(); ctx.moveTo(0, 0); ctx.arc(0, 0, radius, sweep - i * .011, sweep - (i - 1) * .011); ctx.closePath(); ctx.fill()
+  }
+  ctx.strokeStyle = '#77f3a7'; ctx.lineWidth = 2; ctx.beginPath(); ctx.moveTo(0, 0); ctx.lineTo(Math.cos(sweep) * radius, Math.sin(sweep) * radius); ctx.stroke()
+  for (const target of contacts) {
+    const x = chartX(target.x); const y = chartY(target.z)
+    ctx.save(); ctx.translate(x, y)
+    ctx.fillStyle = target.kind === 'buoy' ? '#e7cb75' : target.kind === 'wreck' ? '#ca9070' : '#9bf8a2'
+    if (target.kind === 'ship' || target.kind === 'boat') {
+      ctx.rotate(-target.yaw); const size = target.kind === 'ship' ? 7 : 4
+      ctx.beginPath(); ctx.moveTo(0, -size * 1.5); ctx.lineTo(size * .7, size); ctx.lineTo(-size * .7, size); ctx.closePath(); ctx.fill()
+      ctx.rotate(target.yaw)
+    } else if (target.kind === 'wreck') {
+      ctx.strokeStyle = '#ca9070'; ctx.beginPath(); ctx.moveTo(-3, -3); ctx.lineTo(3, 3); ctx.moveTo(3, -3); ctx.lineTo(-3, 3); ctx.stroke()
+    } else { ctx.beginPath(); ctx.arc(0, 0, 2.2, 0, Math.PI * 2); ctx.fill() }
+    if (target.kind === 'ship') { ctx.font = '15px ui-monospace, monospace'; ctx.fillStyle = '#b2e8c2'; ctx.textAlign = 'left'; ctx.fillText(shipLabels.get(target.name)!, 12, -7) }
+    ctx.restore()
+  }
+  ctx.save(); ctx.rotate(-own.yaw)
+  ctx.fillStyle = '#d1fbe4'; ctx.beginPath(); ctx.moveTo(0, -12); ctx.lineTo(7, 9); ctx.lineTo(0, 5); ctx.lineTo(-7, 9); ctx.closePath(); ctx.fill(); ctx.restore()
   ctx.restore()
   ctx.textAlign = 'left'; ctx.fillStyle = '#11251f'; ctx.fillRect(960, 90, 294, 586)
-  const values = [['HEADING', '084°'], ['SPEED', '8.2 kn'], ['RANGE', '2.0 NM'], ['GAIN', 'AUTO'], ['TARGETS', '5 TRACKED']]
-  values.forEach(([title, value], i) => {
-    ctx.font = '16px ui-monospace, monospace'; ctx.fillStyle = '#598573'; ctx.fillText(title, 984, 134 + i * 98)
-    ctx.font = '27px ui-monospace, monospace'; ctx.fillStyle = '#aadfbc'; ctx.fillText(value, 984, 174 + i * 98)
-  })
-  ctx.font = '16px ui-monospace, monospace'; ctx.fillStyle = '#3e7359'; ctx.fillText('CHART PLOTTER VIDEO OUTPUT', 28, 706)
+  function text(value: string, y: number, size = 18, color = '#aadfbc') { ctx.font = `${size}px ui-monospace, monospace`; ctx.fillStyle = color; ctx.fillText(value, 982, y) }
+  text(active ? 'OWN YACHT · CRUISING' : 'OWN YACHT · STATIONARY', 124, 16, '#598573')
+  const heading = Math.round(radarBearing(Math.sin(own.yaw), Math.cos(own.yaw))) % 360
+  text(`${String(heading).padStart(3, '0')}° / ${(own.speed * 1.94384).toFixed(1)} kn`, 156, 25)
+  text('RANGE 0.5 NM / 926 m', 198, 17)
+  text(`${contacts.length} SCENE CONTACTS`, 240, 20)
+  const nearestShips = [...ships].sort((a, b) => Math.hypot(a.x - own.x, a.z - own.z) - Math.hypot(b.x - own.x, b.z - own.z)).slice(0, 2)
+  for (const [i, target] of nearestShips.entries()) {
+    const top = 292 + i * 126
+    text(`${shipLabels.get(target.name)} ${target.name.replace(/^(Container ship|Cargo ship|Product tanker|Island ferry) /, '').slice(0, 16)}`, top, 20)
+    text(`${Math.round(Math.hypot(target.x - own.x, target.z - own.z))} m  BRG ${String(Math.round(radarBearing(target.x - own.x, target.z - own.z)) % 360).padStart(3, '0')}°`, top + 30, 16)
+    text(`${(target.speed * 1.94384).toFixed(1)} kn  ·  LIVE`, top + 57, 16, '#69b088')
+  }
+  text(active ? `${contacts.filter(item => item.kind === 'ship' || item.kind === 'boat').length} vessels / ${contacts.filter(item => item.kind === 'buoy').length} buoys` : 'Yacht scene inactive', 578, 14, '#719c87')
+  if (active) text(`Cruise loop ${Math.floor(seconds % yachtCruiseDuration / yachtCruiseDuration * 100)}%`, 606, 14, '#719c87')
+  text('Green: vessels', 642, 14, '#719c87'); text('Gold: buoys  Rust: wrecks', 662, 13, '#719c87')
+  ctx.font = '16px ui-monospace, monospace'; ctx.fillStyle = '#3e7359'; ctx.fillText('CHART PLOTTER VIDEO OUTPUT · NORTH UP · LIVE YACHT POSITION', 28, 706)
 }
 
 export function drawStreaming(ctx: CanvasRenderingContext2D, seconds: number) {

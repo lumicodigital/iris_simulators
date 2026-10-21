@@ -2,7 +2,7 @@ import * as THREE from 'three'
 
 // Dimensions are visual proportions from the supplied camera references.
 // The mounting foot stays fixed, the outer yoke pans, and the lens head tilts.
-export function createPtzCamera(scene: THREE.Scene) {
+export function createPtzCamera(scene: THREE.Object3D) {
   const white = new THREE.MeshPhysicalMaterial({ color: 0xeeefed, metalness: 0.08, roughness: 0.32, clearcoat: 0.5, clearcoatRoughness: 0.24 })
   const faceWhite = new THREE.MeshPhysicalMaterial({ color: 0xf4f4f0, metalness: 0.03, roughness: 0.36, clearcoat: 0.3 })
   const seam = new THREE.MeshStandardMaterial({ color: 0x5a6265, metalness: 0.15, roughness: 0.64 })
@@ -177,5 +177,5 @@ export function createPtzCamera(scene: THREE.Scene) {
   reflectionWhite.scale.set(0.40, 1, 0.15)
 
   const lensAnchor = new THREE.Vector3(0, opticalY, 0.79)
-  return { pan, tilt, ledMaterial, lensAnchor }
+  return { mount, pan, tilt, ledMaterial, lensAnchor }
 }

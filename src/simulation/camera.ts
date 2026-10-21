@@ -8,6 +8,7 @@ export interface CameraState extends Pose {
   zeroPan: number; autofocus: boolean
   thermalEnabled: boolean; thermalPalette: string; thermalInverted: boolean
   lampOn: boolean; lampArmedUntil: number
+  gyroOn: boolean; gyroTrim: number; gyroStartedAt: number
 }
 export interface CameraProfile {
   maxPanSpeed: number; turboPanSpeed: number; maxTiltSpeed: number
@@ -15,9 +16,10 @@ export interface CameraProfile {
 }
 export const defaultProfile: CameraProfile = { maxPanSpeed: 40, turboPanSpeed: 60, maxTiltSpeed: 20, minTilt: -90, maxTilt: 90, maxZoom: 30, watchdogMs: 15000 }
 export const autoScanRate = 7.5
+const focusTravelRate = 0.5 // Full near-to-far travel in two seconds.
 export const stoppedMotion = (): Motion => ({ pan: 0, tilt: 0, zoom: 0, focus: 0, iris: 0, panSpeed: 0, tiltSpeed: 0 })
 export function createCamera(): CameraState {
-  return { pan: 0, tilt: 0, zoom: 1, focus: 0.5, iris: 0.7, power: true, scanning: false, motion: stoppedMotion(), target: null, presets: new Map(), lastMotionAt: 0, watchdogStopped: false, zeroPan: 0, autofocus: true, thermalEnabled: false, thermalPalette: 'white-hot', thermalInverted: false, lampOn: false, lampArmedUntil: 0 }
+  return { pan: 0, tilt: 0, zoom: 1, focus: 0.5, iris: 0.7, power: true, scanning: false, motion: stoppedMotion(), target: null, presets: new Map(), lastMotionAt: 0, watchdogStopped: false, zeroPan: 0, autofocus: true, thermalEnabled: false, thermalPalette: 'white-hot', thermalInverted: false, lampOn: false, lampArmedUntil: 0, gyroOn: false, gyroTrim: 0, gyroStartedAt: 0 }
 }
 const wrap = (angle: number) => ((angle % 360) + 360) % 360
 const clamp = (value: number, low: number, high: number) => Math.min(high, Math.max(low, value))
@@ -71,6 +73,11 @@ export function applyPacket(camera: CameraState, packet: Packet, now = Date.now(
   }
   const { action, preset } = command
   if (action === 'call') {
+    if (preset === 251 || preset === 252) {
+      if (preset === 251 && !camera.gyroOn) camera.gyroStartedAt = performance.now() / 1000
+      camera.gyroOn = preset === 251; return 'Applied'
+    }
+    if (preset === 249 || preset === 250) { camera.gyroTrim = clamp(camera.gyroTrim + (preset === 250 ? 0.25 : -0.25), -10, 10); return 'Applied' }
     const palette = thermalPalettes.find(item => item.preset === preset)
     if (palette) { camera.thermalPalette = palette.id; camera.thermalEnabled = true; return 'Applied' }
     if (preset === 90) { camera.lampArmedUntil = now + 2000; return 'Lamp armed' }
@@ -110,14 +117,14 @@ export function stepCamera(camera: CameraState, profile: CameraProfile, seconds:
     camera.pan = wrap(camera.pan + clamp(delta, -travel, travel))
     camera.tilt += clamp(target.tilt - camera.tilt, -profile.maxTiltSpeed * zoomFactor * dt, profile.maxTiltSpeed * zoomFactor * dt)
     camera.zoom += clamp(target.zoom - camera.zoom, -2.5 * dt, 2.5 * dt)
-    camera.focus += clamp(target.focus - camera.focus, -0.1 * dt, 0.1 * dt)
+    camera.focus += clamp(target.focus - camera.focus, -focusTravelRate * dt, focusTravelRate * dt)
     camera.iris += clamp(target.iris - camera.iris, -0.1 * dt, 0.1 * dt)
     if (Math.abs(delta) <= travel && Math.abs(target.tilt - camera.tilt) < 0.001 && Math.abs(target.zoom - camera.zoom) < 0.001 && Math.abs(target.focus - camera.focus) < 0.001 && Math.abs(target.iris - camera.iris) < 0.001) camera.target = null
   } else {
     camera.pan = wrap(camera.pan + (camera.scanning ? autoScanRate * zoomFactor : camera.motion.pan * panRate(camera.motion.panSpeed, profile, camera.zoom)) * dt)
     camera.tilt = clamp(camera.tilt + camera.motion.tilt * tiltRate(camera.motion.tiltSpeed, profile, camera.zoom) * dt, profile.minTilt, profile.maxTilt)
     camera.zoom = clamp(camera.zoom + camera.motion.zoom * 2.5 * dt, 1, profile.maxZoom)
-    camera.focus = clamp(camera.focus + camera.motion.focus * 0.1 * dt, 0, 1)
+    camera.focus = clamp(camera.focus + camera.motion.focus * focusTravelRate * dt, 0, 1)
     camera.iris = clamp(camera.iris + camera.motion.iris * 0.1 * dt, 0, 1)
   }
   return false

@@ -57,8 +57,8 @@ export function decode(bytes: readonly number[], cameraAddress: number, turboByt
       packet.command = { type: 'preset', action, preset: data2 }
       packet.description = `${action === 'save' ? 'Save' : action === 'clear' ? 'Clear' : 'Call'} preset ${data2}`
       const palette = thermalPalettes.find(item => item.preset === data2)
-      const irisCommand = action === 'call' && (palette || [90, 226, 229, 253, 254].includes(data2))
-      if (irisCommand) packet.description = palette ? `IRIS thermal palette: ${palette.name}` : ({ 90: 'IRIS lamp selector', 226: 'IRIS thermal off', 229: 'IRIS thermal on', 253: 'IRIS negative polarity', 254: 'IRIS positive polarity' } as Record<number, string>)[data2]
+      const irisCommand = action === 'call' && (palette || [90, 226, 229, 249, 250, 251, 252, 253, 254].includes(data2))
+      if (irisCommand) packet.description = palette ? `IRIS thermal palette: ${palette.name}` : ({ 90: 'IRIS lamp selector', 226: 'IRIS thermal off', 229: 'IRIS thermal on', 249: 'IRIS gyro trim down', 250: 'IRIS gyro trim up', 251: 'IRIS gyro on', 252: 'IRIS gyro off', 253: 'IRIS negative polarity', 254: 'IRIS positive polarity' } as Record<number, string>)[data2]
       if (data2 > 32 && data2 !== 33 && data2 !== 34 && !irisCommand) issue('warning', 'This preset is outside the supported positions and IRIS feature commands; it may be model-specific.', 5)
       if ((data2 === 33 || data2 === 34) && action !== 'call') issue('warning', 'Presets 33 and 34 are reserved for flip and zero pan in this profile.', 5)
     } else if (cmd2 === 0x0d) {

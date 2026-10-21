@@ -2,6 +2,7 @@ import type { SimulatedCamera } from '../simulation/cameras'
 import { nvrCamera, nvrChannels, type NvrConfig, type NvrState } from '../simulation/nvr'
 import type { MonitorOutput } from '../simulation/videoRouting'
 import { drawRadar, drawStreaming } from './displaySources'
+import type { SceneEnvironment } from '../simulation/environment'
 
 export function createMonitorVideo() {
   const frames = new Map<string, HTMLCanvasElement>()
@@ -9,10 +10,10 @@ export function createMonitorVideo() {
   program.width = 1280; program.height = 720
   const sources = new Map(['radar', 'streaming'].map(type => { const canvas = document.createElement('canvas'); canvas.width = 1280; canvas.height = 720; return [type, canvas] as const }))
   const started = performance.now()
-  function renderSources() {
-    const seconds = (performance.now() - started) / 1000
-    drawRadar(sources.get('radar')!.getContext('2d')!, seconds)
-    drawStreaming(sources.get('streaming')!.getContext('2d')!, seconds)
+  function renderSources(environment: SceneEnvironment = 'yacht') {
+    const now = performance.now()
+    drawRadar(sources.get('radar')!.getContext('2d')!, now / 1000, environment)
+    drawStreaming(sources.get('streaming')!.getContext('2d')!, (now - started) / 1000)
   }
   function capture(id: string, frame: HTMLCanvasElement) {
     let canvas = frames.get(id)
