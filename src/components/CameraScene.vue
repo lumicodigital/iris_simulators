@@ -7,14 +7,14 @@ import { createPtzCamera } from '../scene/ptzCamera'
 import { createThermalView, type HeatSource } from '../scene/thermalView'
 import { findPalette } from '../simulation/thermalPalettes'
 import type { SimulatedCamera } from '../simulation/cameras'
-import { yachtMountFor, yachtRenderDistance, type SceneEnvironment } from '../simulation/environment'
+import { yachtMountFor, yachtRenderDistance, type SceneEnvironment, type TimeOfDay } from '../simulation/environment'
 import { createYacht } from '../scene/yacht'
 import { compensateGyro } from '../scene/vesselMotion'
 import { createCameraEffects, type CameraEffectsSettings } from '../scene/cameraEffects'
-import { createSky, maritimeSunDirection } from '../scene/sky'
+import { createSky, maritimeSunDirection, maritimeSunDirectionFor } from '../scene/sky'
 import { yachtPose } from '../simulation/maritime'
 
-const props = defineProps<{ camera: CameraState; showFrustum: boolean; compact?: boolean; videoOnly?: boolean; environment?: SceneEnvironment; night?: boolean; waveStrength?: number; cameras?: SimulatedCamera[]; cameraId?: string }>()
+const props = withDefaults(defineProps<{ camera: CameraState; showFrustum: boolean; compact?: boolean; videoOnly?: boolean; videoActive?: boolean; videoHighQuality?: boolean; environment?: SceneEnvironment; night?: boolean; timeOfDay?: TimeOfDay; waveStrength?: number; cameras?: SimulatedCamera[]; cameraId?: string }>(), { videoActive: true })
 const emit = defineEmits<{ videoFrame: [canvas: HTMLCanvasElement] }>()
 const host = ref<HTMLDivElement>()
 const fullscreenButton = ref<HTMLButtonElement>()
@@ -88,7 +88,7 @@ onMounted(() => {
     // Millimetre camera details and distant shorelines need the same depth buffer.
     const renderer = new THREE.WebGLRenderer({ antialias: true, logarithmicDepthBuffer: aboard })
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, props.videoOnly ? 1 : props.compact ? 1.5 : 2))
-    renderer.shadowMap.enabled = !props.videoOnly
+    renderer.shadowMap.enabled = !props.videoOnly || Boolean(props.videoHighQuality)
     renderer.shadowMap.type = THREE.PCFSoftShadowMap
     renderer.setClearColor(0x131c24)
     element.appendChild(renderer.domElement)
@@ -101,7 +101,8 @@ onMounted(() => {
     const light = new THREE.DirectionalLight(0xffffff, 4)
     light.position.set(aboard ? 25 : 5, aboard ? 55 : 15, aboard ? 20 : 9); light.castShadow = true
     if (aboard) light.position.copy(maritimeSunDirection).multiplyScalar(65)
-    light.shadow.mapSize.set(props.compact ? 1024 : 2048, props.compact ? 1024 : 2048)
+    const shadowSize = props.videoHighQuality || !props.compact ? 2048 : 1024
+    light.shadow.mapSize.set(shadowSize, shadowSize)
     light.shadow.camera.left = aboard ? -35 : -20; light.shadow.camera.right = aboard ? 35 : 20
     light.shadow.camera.top = aboard ? 35 : 20; light.shadow.camera.bottom = aboard ? -35 : -20
     light.shadow.camera.far = 120; light.shadow.normalBias = 0.035
@@ -141,7 +142,7 @@ onMounted(() => {
       item.position.set(x, y, z); item.castShadow = true; item.receiveShadow = true
       parent.add(item); return item
     }
-    const yacht = aboard ? createYacht(scene, props.compact || props.videoOnly ? 128 : 384) : undefined
+    const yacht = aboard ? createYacht(scene, props.videoHighQuality || (!props.compact && !props.videoOnly) ? 384 : 128) : undefined
     yacht?.update(performance.now() / 1000, props.waveStrength ?? 1)
     const heatSources: HeatSource[] = yacht ? yacht.heatSources : []
     let ground: THREE.Mesh | undefined
@@ -264,11 +265,13 @@ onMounted(() => {
     }
     const thermalView = createThermalView(heatSources, sky?.thermalObject)
     const opticalView = createCameraEffects()
+    const daylightLightPosition = light.position.clone()
     const sunDirection = light.position.clone().sub(light.target.position).normalize()
     let previousInstallation = installation.value.id
-    let previousNight: boolean | undefined
+    let previousTimeOfDay: TimeOfDay | undefined
     if (aboard && previousInstallation === 'boiler-room') focusCamera()
     let width = 1; let height = 1; let frame = 0; let lastFov = -1; let lastRendered = 0
+    let previousVideoQuality = Boolean(props.videoHighQuality)
     const resize = new ResizeObserver(() => {
       width = element.clientWidth; height = element.clientHeight
       if (!width || !height) return
@@ -279,20 +282,45 @@ onMounted(() => {
     function render(now = performance.now()) {
       frame = requestAnimationFrame(render)
       if (!width || !height) return
-      if (props.compact && !isFullscreen.value && now - lastRendered < 1000 / 30) return
+      if (props.videoOnly) {
+        const quality = Boolean(props.videoHighQuality)
+        if (quality !== previousVideoQuality) {
+          previousVideoQuality = quality; renderer.shadowMap.enabled = quality
+          light.shadow.map?.dispose(); light.shadow.map = null
+          light.shadow.mapSize.set(quality ? 2048 : 1024, quality ? 2048 : 1024)
+          yacht?.setReflectionSize(quality ? 384 : 128)
+          scene.traverse(object => {
+            if (object instanceof THREE.Mesh) for (const material of Array.isArray(object.material) ? object.material : [object.material]) material.needsUpdate = true
+          })
+        }
+        if (props.videoActive === false) { opticalView.releaseTargets(); thermalView.releaseTargets(); return }
+        if (props.camera.thermalEnabled) opticalView.releaseTargets()
+        else thermalView.releaseTargets()
+      }
+      if (props.compact && !isFullscreen.value && !props.videoHighQuality && now - lastRendered < 1000 / 30) return
       lastRendered = now
-      const night = Boolean(props.night)
-      if (night !== previousNight) {
-        previousNight = night
-        ambient.intensity = night ? 0.065 : 2.8
-        ambient.color.set(night ? 0x789ac7 : 0xcde6ff)
-        ambient.groundColor.set(night ? 0x0c1424 : 0x283236)
-        light.intensity = night ? 0.045 : 4
-        light.color.set(night ? 0x91b7e1 : 0xffffff)
-        if (aboard) scene.background = new THREE.Color(night ? 0x030914 : 0xb5d3df)
-        else { renderer.setClearColor(night ? 0x030914 : 0x131c24); scene.fog?.color.set(night ? 0x030914 : 0x131c24) }
+      const timeOfDay = props.timeOfDay ?? (props.night ? 'night' : 'day')
+      const night = timeOfDay === 'night'; const goldenHour = timeOfDay === 'golden-hour'
+      if (timeOfDay !== previousTimeOfDay) {
+        previousTimeOfDay = timeOfDay
+        ambient.intensity = night ? 0.065 : goldenHour ? 1.35 : 2.8
+        ambient.color.set(night ? 0x789ac7 : goldenHour ? 0xe7b7a4 : 0xcde6ff)
+        ambient.groundColor.set(night ? 0x0c1424 : goldenHour ? 0x49394d : 0x283236)
+        light.intensity = night ? 0.045 : goldenHour ? 3.2 : 4
+        light.color.set(night ? 0x91b7e1 : goldenHour ? 0xffbd75 : 0xffffff)
+        light.shadow.camera.far = goldenHour ? 400 : 120; light.shadow.camera.updateProjectionMatrix()
+        if (aboard) {
+          scene.background = new THREE.Color(night ? 0x030914 : goldenHour ? 0xe9ac81 : 0xb5d3df)
+          sunDirection.copy(maritimeSunDirectionFor(timeOfDay))
+        } else {
+          light.position.copy(daylightLightPosition)
+          if (goldenHour) light.position.y = 1.8
+          sunDirection.copy(light.position).sub(light.target.position).normalize()
+          const background = night ? 0x030914 : goldenHour ? 0x292131 : 0x131c24
+          renderer.setClearColor(background); scene.fog?.color.set(background)
+        }
         yacht?.setNight(night)
-        sky?.setNight(night)
+        sky?.setTimeOfDay(timeOfDay)
       }
       sky?.update(now / 1000)
       yacht?.update(now / 1000, props.waveStrength ?? 1)

@@ -105,6 +105,7 @@ export function createReflectionVisibility(scene: THREE.Scene, size: number) {
       setPass(true)
     },
     end() { setPass(false) },
+    setSize(value: number) { size = value; target.setSize(size, size) },
     dispose() {
       for (const [material, hook] of hooks) { material.onBeforeCompile = hook.compile; material.customProgramCacheKey = hook.cache; material.needsUpdate = true }
       hooks.clear(); target.dispose(); depth.dispose()

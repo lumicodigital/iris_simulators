@@ -173,6 +173,7 @@ export function createCameraEffects(thermal = false) {
         restore()
       }
     },
+    releaseTargets() { target.setSize(1, 1) },
     dispose() { target.dispose(); palette.dispose(); quad.geometry.dispose(); material.dispose() },
   }
 }

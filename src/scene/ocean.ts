@@ -155,6 +155,11 @@ export function createOcean(scene: THREE.Scene, reflectionSize = 256) {
       ocean.position.x = pose.x; ocean.position.z = pose.z
     },
     setNight(night: boolean) { material.color.set(night ? 0x102a3e : 0x267b8c) },
+    setReflectionSize(value: number) {
+      if (reflectionSize === value) return
+      reflectionSize = value; visibility.setSize(value)
+      for (const mirror of reflections.values()) mirror.getRenderTarget().setSize(value, value)
+    },
     dispose() { for (const mirror of reflections.values()) { mirror.geometry.dispose(); mirror.dispose() }; reflections.clear(); visibility.dispose() },
   }
 }

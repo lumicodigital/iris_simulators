@@ -71,6 +71,7 @@ export function createThermalView(sources: HeatSource[], sky?: THREE.Object3D) {
       }
       effects.render(renderer, thermalScene, camera, settings, width, height)
     },
+    releaseTargets() { effects.releaseTargets() },
     dispose() {
       for (const material of materials.values()) material.dispose()
       effects.dispose()

@@ -8,9 +8,9 @@ import { busDiagnostics, type BusSettings } from '../simulation/serialBus'
 import { createSimulatedCamera, maxCameras, normalizeCameraConfig, type CameraConfig, type SimulatedCamera } from '../simulation/cameras'
 import { isAppliedDelivery, type CaptureEntry } from '../simulation/history'
 import { baudRates, type Switcher } from '../simulation/switcher'
-import { yachtMounts, yachtMountFor, type SceneEnvironment } from '../simulation/environment'
+import { yachtMounts, yachtMountFor, type TimeOfDay, type SceneEnvironment } from '../simulation/environment'
 
-const props = defineProps<{ environment: SceneEnvironment; night: boolean; waveStrength: number; cameras: SimulatedCamera[]; switchers: Switcher[]; entries: CaptureEntry[]; settings: BusSettings; pending: number; storageError: string; selectedNvrId?: number }>()
+const props = defineProps<{ environment: SceneEnvironment; night: boolean; timeOfDay?: TimeOfDay; waveStrength: number; cameras: SimulatedCamera[]; switchers: Switcher[]; entries: CaptureEntry[]; settings: BusSettings; pending: number; storageError: string; selectedNvrId?: number }>()
 const emit = defineEmits<{ cameras: [items: CameraConfig[]]; controls: [id: string]; switchers: []; stop: []; clearNvr: [] }>()
 const editor = ref<HTMLDialogElement>()
 const draft = ref<CameraConfig[]>([])
@@ -50,7 +50,7 @@ function save() {
     <div class="overview-cameras" :style="{ '--camera-columns': Math.min(visibleCameras.length + (cameras.length < maxCameras && visibleCameras.length < 4 ? 1 : 0), 4) }">
       <article v-for="camera in visibleCameras" :key="camera.id" class="panel overview-camera-card" :aria-label="`${camera.name}, serial address ${camera.address}`" :data-camera-window="camera.address">
         <div class="camera-window-heading"><strong :title="camera.name">{{ camera.name }}</strong><code>ADDR {{ camera.address }}</code><button class="text-button" :aria-label="`Open controls for ${camera.name}`" @click="emit('controls', camera.id)">↗</button></div>
-        <CameraScene :key="`${environment}-${camera.id}`" :environment="environment" :night="night" :wave-strength="waveStrength" :cameras="cameras" :camera-id="camera.id" :camera="camera.state" :show-frustum="false" compact />
+        <CameraScene :key="`${environment}-${camera.id}`" :environment="environment" :night="night" :time-of-day="timeOfDay" :wave-strength="waveStrength" :cameras="cameras" :camera-id="camera.id" :camera="camera.state" :show-frustum="false" compact />
         <div v-if="environment === 'yacht'" class="camera-location-label">{{ yachtMountFor(camera, cameras.indexOf(camera)).name }}</div>
         <div class="camera-window-readout"><span>PAN <b>{{ displayedPan(camera).toFixed(1) }}°</b></span><span>TILT <b>{{ camera.state.tilt.toFixed(1) }}°</b></span><span>ZOOM <b>{{ camera.state.zoom.toFixed(1) }}×</b></span><span v-if="camera.state.lampOn" class="overview-lamp">☀</span></div>
       </article>

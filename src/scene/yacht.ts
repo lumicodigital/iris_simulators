@@ -170,6 +170,7 @@ export function createYacht(scene: THREE.Scene, reflectionSize = 256) {
       surroundings.update(seconds, strength); wakes.update(seconds, strength)
     },
     cutaway(enabled: boolean) { exterior.visible = !enabled; outline.visible = enabled },
+    setReflectionSize(value: number) { ocean.setReflectionSize(value) },
     dispose() { ocean.dispose(); surroundings.dispose() },
   }
 }

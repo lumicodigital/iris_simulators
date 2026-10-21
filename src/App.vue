@@ -18,7 +18,7 @@ import { createSwitcher, loadSwitchers, switcherStorageKey, type Switcher } from
 import { createDefaultNvrConfig } from './simulation/defaults'
 
 import { cameraStorageKey, completeYachtCameras, createDefaultCameras, loadCameras, maxCameras, normalizeCameraConfig, type CameraConfig, type SimulatedCamera } from './simulation/cameras'
-import { environmentStorageKey, loadEnvironment, loadNight, loadWaveStrength, normalizeWaveStrength, nightStorageKey, waveStrengthStorageKey, yachtMountFor, type SceneEnvironment } from './simulation/environment'
+import { environmentStorageKey, loadEnvironment, loadTimeOfDay, loadWaveStrength, normalizeWaveStrength, nightStorageKey, timeOfDayStorageKey, waveStrengthStorageKey, yachtMountFor, type SceneEnvironment, type TimeOfDay } from './simulation/environment'
 import { cameraHistory, captureSummary, pelcoAddress, type CaptureEntry as Entry } from './simulation/history'
 import type { SerialPortInfo } from './simulation/serialPorts'
 const cameras = ref(loadCameras())
@@ -30,10 +30,24 @@ const turboByte = ref(0xff)
 const address = computed({ get: () => selectedCamera.value.address, set: value => { selectedCamera.value.address = value } })
 const activeSimulator = ref('monitors')
 const sceneEnvironment = ref(loadEnvironment())
-const night = ref(loadNight())
+const timeOfDay = ref(loadTimeOfDay())
+const night = computed(() => timeOfDay.value === 'night')
 const waveStrength = ref(loadWaveStrength())
 watch(waveStrength, value => { try { localStorage.setItem(waveStrengthStorageKey, String(normalizeWaveStrength(value))) } catch { /* Keep sea state adjustable for this session. */ } })
-watch(night, value => { try { localStorage.setItem(nightStorageKey, String(value)) } catch { /* Keep lighting available for this session. */ } })
+watch(timeOfDay, value => {
+  try { localStorage.setItem(timeOfDayStorageKey, value); localStorage.setItem(nightStorageKey, String(value === 'night')) }
+  catch { /* Keep lighting available for this session. */ }
+})
+function onLightingKey(event: KeyboardEvent) {
+  if (event.defaultPrevented || event.repeat || event.isComposing || event.altKey || event.ctrlKey || event.metaKey) return
+  const target = event.target
+  if (target instanceof Element && (target.closest('input, textarea, select, [role="textbox"], [role="combobox"]') || (target instanceof HTMLElement && target.isContentEditable))) return
+  const key = event.key.toLowerCase()
+  const modes: Record<string, TimeOfDay> = { d: 'day', g: 'golden-hour', n: 'night' }
+  const selected = key === 't' ? (night.value ? 'day' : 'night') : modes[key]
+  if (!selected) return
+  event.preventDefault(); timeOfDay.value = selected
+}
 const switchers = ref(loadSwitchers(cameras.value[0].id))
 const nvr = reactive(createNvr())
 const nvrConfig = ref(loadNvrConfig(cameras.value))
@@ -362,11 +376,11 @@ onMounted(() => {
     pending.value = bus.pending
     nvrStream.expire().forEach(event => addNvrEntry(event)); nvrPending.value = nvrStream.pending
   }, 100)
-  window.addEventListener('blur', endHold); document.addEventListener('visibilitychange', onVisibility)
+  window.addEventListener('blur', endHold); document.addEventListener('visibilitychange', onVisibility); document.addEventListener('keydown', onLightingKey)
 })
 onUnmounted(() => {
   disposed = true; clearTimeout(reconnect); clearInterval(interval); clearInterval(repeat)
-  cancelAnimationFrame(frame); socket?.close(); window.removeEventListener('blur', endHold); document.removeEventListener('visibilitychange', onVisibility)
+  cancelAnimationFrame(frame); socket?.close(); window.removeEventListener('blur', endHold); document.removeEventListener('visibilitychange', onVisibility); document.removeEventListener('keydown', onLightingKey)
 })
 </script>
 
@@ -381,7 +395,7 @@ onUnmounted(() => {
     <div class="environment-toolbar">
       <div class="environment-picker" role="group" aria-label="3D environment"><span>3D ENVIRONMENT</span><div class="view-mode"><button type="button" :class="{ active: sceneEnvironment === 'vista' }" :aria-pressed="sceneEnvironment === 'vista'" @click="changeEnvironment('vista')">◈ Calibration vista</button><button type="button" :class="{ active: sceneEnvironment === 'yacht' }" :aria-pressed="sceneEnvironment === 'yacht'" @click="changeEnvironment('yacht')">⌁ Mega yacht</button></div></div>
       <label v-if="sceneEnvironment === 'yacht'" class="yacht-location-picker">Inspect location<select :value="selectedCameraId" aria-label="Inspect yacht camera location" @change="selectCamera(($event.target as HTMLSelectElement).value, true)"><option v-for="(item, i) in cameras" :key="item.id" :value="item.id">{{ yachtMountFor(item, i).name }} · ADDR {{ item.address }}</option></select></label>
-      <div class="view-mode daylight-picker" role="group" aria-label="Time of day"><button type="button" :class="{ active: !night }" :aria-pressed="!night" @click="night = false">☀ Day</button><button type="button" :class="{ active: night }" :aria-pressed="night" @click="night = true">☾ Night</button></div>
+      <div class="view-mode daylight-picker" role="group" aria-label="Time of day" title="D: day · G: golden hour · N: night · T: toggle day/night"><button type="button" :class="{ active: timeOfDay === 'day' }" :aria-pressed="timeOfDay === 'day'" aria-keyshortcuts="D" title="Day (D) · Toggle day/night with T" @click="timeOfDay = 'day'">☀ Day <kbd>D</kbd></button><button type="button" :class="{ active: timeOfDay === 'golden-hour' }" :aria-pressed="timeOfDay === 'golden-hour'" aria-keyshortcuts="G" title="Golden hour (G)" @click="timeOfDay = 'golden-hour'">🌅 Golden hour <kbd>G</kbd></button><button type="button" :class="{ active: night }" :aria-pressed="night" aria-keyshortcuts="N" title="Night (N) · Toggle day/night with T" @click="timeOfDay = 'night'">☾ Night <kbd>N</kbd></button></div>
       <label v-if="sceneEnvironment === 'yacht'" class="wave-strength-picker">Waves <input v-model.number="waveStrength" type="range" min="0" max="2" step="0.05" aria-label="Wave strength" :aria-valuetext="waveStrength === 0 ? 'Calm' : `${Math.round(waveStrength * 100)} percent`" /><output>{{ waveStrength === 0 ? 'Calm' : `${Math.round(waveStrength * 100)}%` }}</output></label>
       <span class="environment-note">{{ sceneEnvironment === 'yacht' ? 'Island cruise · skyline & Spinnaker Tower · 8 km visibility' : 'Original calibration targets · live camera feeds' }}</span>
     </div>
@@ -389,15 +403,15 @@ onUnmounted(() => {
     <main :class="{ 'overview-main': ['overview', 'monitors'].includes(activeSimulator) }">
       <div v-if="['camera', 'switchers'].includes(activeSimulator)" class="page-heading"><div><div class="eyebrow">IRIS SYSTEMS <span>/</span> SERIAL PROTOCOLS</div><h1>{{ activeSimulator === 'camera' ? 'Pelco-D' : 'Monitor switching' }} <span>simulator</span><span class="protocol-badge">SHARED SERIAL BUS</span></h1><p>Watch camera motion and monitor routes respond to the same command stream.</p></div><button class="button danger-outline" @click="emergencyStop"><span class="stop-square"></span> Stop all cameras</button></div>
 
-      <SimulatorOverview v-if="activeSimulator === 'overview'" id="overview-simulator" :environment="sceneEnvironment" :night="night" :wave-strength="waveStrength" :cameras="cameras" :switchers="switchers" :entries="entries" :selected-nvr-id="selectedNvrId" :settings="busSettings" :pending="pending.length" :storage-error="cameraStorageError" @cameras="updateCameras" @controls="selectCamera($event, true)" @switchers="activeSimulator = 'switchers'" @stop="emergencyStop" @clear-nvr="clearNvrLog" />
+      <SimulatorOverview v-if="activeSimulator === 'overview'" id="overview-simulator" :environment="sceneEnvironment" :night="night" :time-of-day="timeOfDay" :wave-strength="waveStrength" :cameras="cameras" :switchers="switchers" :entries="entries" :selected-nvr-id="selectedNvrId" :settings="busSettings" :pending="pending.length" :storage-error="cameraStorageError" @cameras="updateCameras" @controls="selectCamera($event, true)" @switchers="activeSimulator = 'switchers'" @stop="emergencyStop" @clear-nvr="clearNvrLog" />
 
-      <MonitorSimulation v-if="activeSimulator === 'monitors'" id="monitor-simulator" :environment="sceneEnvironment" :night="night" :wave-strength="waveStrength" :cameras="cameras" :switchers="switchers" :nvr="nvr" :config="nvrConfig" :entries="entries" :connected="nvrConnected" :path="nvrPath" v-model:serial-path="nvrSerialPath" v-model:serial-baud="nvrBaudRate" :ports="ports" :refreshing="refreshingPorts" :ports-error="portsError" :busy="nvrBusy" :bridge-connected="bridgeConnected" :error="nvrError" :pending="nvrPending.length" :storage-error="nvrStorageError || storageError || cameraStorageError" :defaults-restored="defaultsRestored" @reset="resetSimulationDefaults" @undo-reset="undoDefaultReset" @dismiss-reset="dismissDefaultReset" @bytes="receiveNvr($event, 'nvr-controls', true)" @config="nvrConfig = $event" @switchers="switchers = $event" @route="routeSwitcher" @serial="toggleNvrSerial" @refresh-ports="refreshPorts" @inspect="inspectNvr" @configure-switchers="activeSimulator = 'switchers'" />
+      <MonitorSimulation v-if="activeSimulator === 'monitors'" id="monitor-simulator" :environment="sceneEnvironment" :night="night" :time-of-day="timeOfDay" :wave-strength="waveStrength" :cameras="cameras" :switchers="switchers" :nvr="nvr" :config="nvrConfig" :entries="entries" :connected="nvrConnected" :path="nvrPath" v-model:serial-path="nvrSerialPath" v-model:serial-baud="nvrBaudRate" :ports="ports" :refreshing="refreshingPorts" :ports-error="portsError" :busy="nvrBusy" :bridge-connected="bridgeConnected" :error="nvrError" :pending="nvrPending.length" :storage-error="nvrStorageError || storageError || cameraStorageError" :defaults-restored="defaultsRestored" @reset="resetSimulationDefaults" @undo-reset="undoDefaultReset" @dismiss-reset="dismissDefaultReset" @bytes="receiveNvr($event, 'nvr-controls', true)" @config="nvrConfig = $event" @switchers="switchers = $event" @route="routeSwitcher" @serial="toggleNvrSerial" @refresh-ports="refreshPorts" @inspect="inspectNvr" @configure-switchers="activeSimulator = 'switchers'" />
 
       <div v-show="['camera', 'switchers'].includes(activeSimulator)">
       <div class="workbench">
         <section v-show="activeSimulator === 'camera'" id="camera-simulator" class="panel visualization-panel" role="tabpanel" aria-labelledby="camera-tab">
           <div class="panel-heading"><h2><span class="small-icon">◈</span> Camera visualization</h2><select v-if="cameras.length > 1" class="camera-picker" :value="selectedCameraId" aria-label="Camera to control" @change="selectCamera(($event.target as HTMLSelectElement).value)"><option v-for="item in cameras" :key="item.id" :value="item.id">{{ item.name }} · {{ item.address }}</option></select><div class="view-actions"><label><input v-model="showFrustum" type="checkbox" /> Field of view</label><button class="icon-button" @click="scene?.resetView()" aria-label="Reset orbit view" title="Reset orbit view">↻</button></div></div>
-          <CameraScene :key="sceneEnvironment" ref="scene" :environment="sceneEnvironment" :night="night" :wave-strength="waveStrength" :cameras="cameras" :camera-id="selectedCameraId" :camera="camera" :show-frustum="showFrustum" />
+          <CameraScene :key="sceneEnvironment" ref="scene" :environment="sceneEnvironment" :night="night" :time-of-day="timeOfDay" :wave-strength="waveStrength" :cameras="cameras" :camera-id="selectedCameraId" :camera="camera" :show-frustum="showFrustum" />
           <div class="telemetry">
             <div><span>PAN ANGLE</span><strong>{{ displayPan.toFixed(1) }}<small>°</small></strong><em>{{ rates.pan.toFixed(1) }}° / s</em></div>
             <div><span>TILT ANGLE</span><strong>{{ camera.tilt.toFixed(1) }}<small>°</small></strong><em>{{ rates.tilt.toFixed(1) }}° / s</em></div>

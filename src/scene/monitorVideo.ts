@@ -1,19 +1,34 @@
 import type { SimulatedCamera } from '../simulation/cameras'
-import { nvrCamera, nvrChannels, type NvrConfig, type NvrState } from '../simulation/nvr'
+import { nvrCamera, type NvrConfig, type NvrState } from '../simulation/nvr'
 import type { MonitorOutput } from '../simulation/videoRouting'
 import { drawRadar, drawStreaming } from './displaySources'
 import type { SceneEnvironment } from '../simulation/environment'
+import { baseVideoSize, nvrCells, type VideoSize } from './videoResolution'
 
 export function createMonitorVideo() {
   const frames = new Map<string, HTMLCanvasElement>()
   const program = document.createElement('canvas')
   program.width = 1280; program.height = 720
-  const sources = new Map(['radar', 'streaming'].map(type => { const canvas = document.createElement('canvas'); canvas.width = 1280; canvas.height = 720; return [type, canvas] as const }))
+  const sources = new Map((['radar', 'streaming'] as const).map(type => { const canvas = document.createElement('canvas'); canvas.width = 1280; canvas.height = 720; return [type, canvas] as const }))
   const started = performance.now()
-  function renderSources(environment: SceneEnvironment = 'yacht') {
+  function renderSources(environment: SceneEnvironment = 'yacht', sizes: Partial<Record<'radar' | 'streaming', VideoSize>> = { radar: baseVideoSize, streaming: baseVideoSize }) {
     const now = performance.now()
-    drawRadar(sources.get('radar')!.getContext('2d')!, now / 1000, environment)
-    drawStreaming(sources.get('streaming')!.getContext('2d')!, (now - started) / 1000)
+    for (const [type, canvas] of sources) {
+      const size = sizes[type]
+      if (!size) { resize(canvas, { width: 1, height: 1 }); continue }
+      resize(canvas, size)
+      const ctx = canvas.getContext('2d')!; ctx.save(); ctx.scale(canvas.width / 1280, canvas.height / 720)
+      if (type === 'radar') drawRadar(ctx, now / 1000, environment)
+      else drawStreaming(ctx, (now - started) / 1000)
+      ctx.restore()
+    }
+  }
+  function resize(canvas: HTMLCanvasElement, size: VideoSize) {
+    if (canvas.width !== size.width || canvas.height !== size.height) { canvas.width = size.width; canvas.height = size.height }
+  }
+  function retainCameras(ids: string[]) {
+    const active = new Set(ids)
+    for (const [id, canvas] of frames) if (!active.has(id)) { resize(canvas, { width: 1, height: 1 }); frames.delete(id) }
   }
   function capture(id: string, frame: HTMLCanvasElement) {
     let canvas = frames.get(id)
@@ -44,30 +59,29 @@ export function createMonitorVideo() {
     label(ctx, `${title}${camera ? `  ${camera.name}` : ''}`, x + 12, y + h - 12, fontSize, '#d2e5e9')
     ctx.restore()
   }
-  function renderNvr(state: NvrState, config: NvrConfig, cameras: readonly SimulatedCamera[]) {
+  function renderNvr(state: NvrState, config: NvrConfig, cameras: readonly SimulatedCamera[], size = baseVideoSize) {
+    resize(program, size)
     const ctx = program.getContext('2d')!
+    ctx.save(); ctx.scale(program.width / 1280, program.height / 720)
     ctx.fillStyle = '#0d1720'; ctx.fillRect(0, 0, 1280, 720)
     label(ctx, config.name.toUpperCase().slice(0, 28), 22, 32, 26, '#d2e5e9')
     ctx.textAlign = 'right'
     label(ctx, `LIVE  ·  CH ${String(state.channel).padStart(2, '0')}  ·  ${state.layout === 1 ? 'FULLSCREEN' : `${state.layout}-WAY SPLIT`}`, 1258, 32, 24, '#88d3b5')
     ctx.textAlign = 'left'
-    const channels = nvrChannels(state)
-    const cols = state.layout === 1 ? 1 : state.layout === 4 ? 2 : 4
-    const rows = state.layout / cols
-    const w = 1280 / cols; const h = 678 / rows
-    channels.forEach((channel, i) => {
-      const x = (i % cols) * w; const y = 42 + Math.floor(i / cols) * h
-      feed(ctx, nvrCamera(config, cameras, channel), x + 2, y + 2, w - 4, h - 4, `CH ${String(channel).padStart(2, '0')}`)
-      if (channel === state.channel) { ctx.strokeStyle = '#91d6b7'; ctx.lineWidth = 3; ctx.strokeRect(x + 2, y + 2, w - 4, h - 4) }
-    })
+    for (const cell of nvrCells(state)) {
+      feed(ctx, nvrCamera(config, cameras, cell.channel), cell.x, cell.y, cell.width, cell.height, `CH ${String(cell.channel).padStart(2, '0')}`)
+      if (cell.channel === state.channel) { ctx.strokeStyle = '#91d6b7'; ctx.lineWidth = 3; ctx.strokeRect(cell.x, cell.y, cell.width, cell.height) }
+    }
+    ctx.restore()
   }
   function renderMonitor(canvas: HTMLCanvasElement, output: MonitorOutput, cameras: readonly SimulatedCamera[]) {
     const ctx = canvas.getContext('2d')!
+    ctx.imageSmoothingEnabled = true; ctx.imageSmoothingQuality = 'high'
     if (output.source.type === 'nvr') { ctx.drawImage(program, 0, 0, canvas.width, canvas.height); return }
     if (output.source.type === 'radar' || output.source.type === 'streaming') { ctx.drawImage(sources.get(output.source.type)!, 0, 0, canvas.width, canvas.height); return }
     const source = output.source
     const camera = source.type === 'camera' ? cameras.find(item => item.id === source.cameraId) : undefined
     feed(ctx, camera, 0, 0, canvas.width, canvas.height, output.source.type === 'camera' ? 'DIRECT CAMERA' : output.reason.toUpperCase())
   }
-  return { capture, renderNvr, renderSources, renderMonitor, dispose: () => { frames.clear(); sources.clear() } }
+  return { capture, retainCameras, renderNvr, renderSources, renderMonitor, dispose: () => { frames.clear(); sources.clear() } }
 }

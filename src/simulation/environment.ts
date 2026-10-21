@@ -1,6 +1,8 @@
 export type SceneEnvironment = 'vista' | 'yacht'
+export type TimeOfDay = 'day' | 'golden-hour' | 'night'
 export const environmentStorageKey = 'iris_simulators_environment_v1'
 export const nightStorageKey = 'iris_simulators_night_v1'
+export const timeOfDayStorageKey = 'iris_simulators_time_of_day_v1'
 export const waveStrengthStorageKey = 'iris_simulators_wave_strength_v1'
 export const normalizeWaveStrength = (value: number) => Number.isFinite(value) ? Math.max(0, Math.min(2, value)) : 1
 export function loadWaveStrength(): number {
@@ -29,7 +31,11 @@ export function loadEnvironment(): SceneEnvironment {
   try { return localStorage.getItem(environmentStorageKey) === 'yacht' ? 'yacht' : 'vista' }
   catch { return 'vista' }
 }
-export function loadNight(): boolean {
-  try { return localStorage.getItem(nightStorageKey) === 'true' }
-  catch { return false }
+export function loadTimeOfDay(): TimeOfDay {
+  try {
+    const saved = localStorage.getItem(timeOfDayStorageKey)
+    if (saved === 'day' || saved === 'golden-hour' || saved === 'night') return saved
+    return localStorage.getItem(nightStorageKey) === 'true' ? 'night' : 'day'
+  } catch { return 'day' }
 }
+export function loadNight(): boolean { return loadTimeOfDay() === 'night' }
