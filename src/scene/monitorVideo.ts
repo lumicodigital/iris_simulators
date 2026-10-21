@@ -3,6 +3,9 @@ import { nvrCamera, type NvrConfig, type NvrState } from '../simulation/nvr'
 import type { MonitorOutput } from '../simulation/videoRouting'
 import { drawRadar, drawStreaming } from './displaySources'
 import type { SceneEnvironment } from '../simulation/environment'
+import { simulationClock } from '../simulation/clock'
+import { thermalSettings } from '../simulation/thermal'
+import { findPalette } from '../simulation/thermalPalettes'
 import { baseVideoSize, nvrCells, type VideoSize } from './videoResolution'
 
 export function createMonitorVideo() {
@@ -10,16 +13,15 @@ export function createMonitorVideo() {
   const program = document.createElement('canvas')
   program.width = 1280; program.height = 720
   const sources = new Map((['radar', 'streaming'] as const).map(type => { const canvas = document.createElement('canvas'); canvas.width = 1280; canvas.height = 720; return [type, canvas] as const }))
-  const started = performance.now()
   function renderSources(environment: SceneEnvironment = 'yacht', sizes: Partial<Record<'radar' | 'streaming', VideoSize>> = { radar: baseVideoSize, streaming: baseVideoSize }) {
-    const now = performance.now()
+    const now = simulationClock.seconds
     for (const [type, canvas] of sources) {
       const size = sizes[type]
       if (!size) { resize(canvas, { width: 1, height: 1 }); continue }
       resize(canvas, size)
       const ctx = canvas.getContext('2d')!; ctx.save(); ctx.scale(canvas.width / 1280, canvas.height / 720)
-      if (type === 'radar') drawRadar(ctx, now / 1000, environment)
-      else drawStreaming(ctx, (now - started) / 1000)
+      if (type === 'radar') drawRadar(ctx, now, environment)
+      else drawStreaming(ctx, now)
       ctx.restore()
     }
   }
@@ -53,6 +55,16 @@ export function createMonitorVideo() {
       ctx.textAlign = 'center'
       label(ctx, camera?.state.power === false ? 'CAMERA OFF' : camera ? 'CONNECTING VIDEO' : 'NO SIGNAL', x + w / 2, y + h / 2, Math.max(12, Math.min(22, w / 20)), '#526879')
       ctx.textAlign = 'left'
+    }
+    if (image && camera?.state.thermalEnabled && w >= 160) {
+      const height = Math.min(h * 0.4, 150); const left = x + w - 70; const top = y + 20
+      ctx.fillStyle = '#041017c9'; ctx.fillRect(left - 8, top - 16, 68, height + 47)
+      const gradient = ctx.createLinearGradient(0, top + height, 0, top)
+      for (const [position, color] of findPalette(camera.state.thermalPalette).stops) gradient.addColorStop(camera.state.thermalInverted ? 1 - position : position, color)
+      ctx.fillStyle = gradient; ctx.fillRect(left, top, 12, height)
+      label(ctx, `${thermalSettings.max}°`, left + 18, top + 9, 12)
+      label(ctx, `${thermalSettings.min}°`, left + 18, top + height, 12)
+      label(ctx, 'SIM °C', left - 1, top + height + 20, 11, '#8babb8')
     }
     const fontSize = Math.max(20, Math.min(30, w / 16))
     ctx.fillStyle = '#061019c9'; ctx.fillRect(x, y + h - fontSize - 18, w, fontSize + 18)

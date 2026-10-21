@@ -1,5 +1,6 @@
 import * as THREE from 'three'
 import type { TimeOfDay } from '../simulation/environment'
+import { thermalSettings } from '../simulation/thermal'
 
 // The visible sun, directional light and optical lens glare share this heading.
 export const maritimeSunDirection = new THREE.Vector3(-0.42, 0.25, 0.83).normalize()
@@ -12,6 +13,7 @@ export function createSky(scene: THREE.Scene) {
     night: { value: false },
     goldenHour: { value: 0 },
     sunDirection: { value: maritimeSunDirection.clone() },
+    thermalLow: { value: 5 }, thermalHigh: { value: 45 }, airTemperature: { value: 20 },
   }
   const geometry = new THREE.SphereGeometry(1, 32, 16)
   const vertexShader = `
@@ -28,6 +30,7 @@ export function createSky(scene: THREE.Scene) {
     uniform bool night;
     uniform float goldenHour;
     uniform vec3 sunDirection;
+    uniform float thermalLow; uniform float thermalHigh; uniform float airTemperature;
     varying vec3 skyDirection;
     float hash(vec2 p) {
       return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
@@ -62,7 +65,8 @@ export function createSky(scene: THREE.Scene) {
       #ifdef THERMAL_SKY
         // Clouds radiate more heat than clear sky; sunlight does not turn the
         // entire thermal image into the optical day's blue and white colours.
-        float heat = mix(0.055 + elevation * 0.01, night ? 0.14 : 0.19, coverage);
+        float temperature = mix(airTemperature - 34.0 - elevation * 8.0, airTemperature - 7.0, coverage);
+        float heat = clamp((temperature - thermalLow) / max(1.0, thermalHigh - thermalLow), 0.0, 1.0);
         if (!night) heat = mix(heat, 1.0, disc * (1.0 - coverage));
         gl_FragColor = vec4(vec3(heat), 1.0);
       #else
@@ -117,7 +121,12 @@ export function createSky(scene: THREE.Scene) {
       uniforms.night.value = value === 'night'; uniforms.goldenHour.value = value === 'golden-hour' ? 1 : 0
       uniforms.sunDirection.value.copy(maritimeSunDirectionFor(value))
     },
-    update(seconds: number) { uniforms.skyTime.value = seconds },
+    update(seconds: number) {
+      uniforms.skyTime.value = seconds
+      uniforms.thermalLow.value = Number.isFinite(thermalSettings.min) ? thermalSettings.min : 5
+      uniforms.thermalHigh.value = Number.isFinite(thermalSettings.max) ? thermalSettings.max : 45
+      uniforms.airTemperature.value = Number.isFinite(thermalSettings.air) ? thermalSettings.air : 20
+    },
     // The main scene owns the shared geometry and optical material.
     dispose() { thermalObject.material.dispose() },
   }

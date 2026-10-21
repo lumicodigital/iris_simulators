@@ -14,6 +14,7 @@ function vesselTemplate(type: VesselType) {
   const white = new THREE.MeshStandardMaterial({ color: 0xe5e9e1, roughness: 0.6 })
   const dark = new THREE.MeshStandardMaterial({ color: 0x253c48, roughness: 0.65 })
   const glass = new THREE.MeshStandardMaterial({ color: 0x32657b, metalness: 0.4, roughness: 0.25, emissive: 0xffce87, emissiveIntensity: 0 })
+  glass.userData.thermalSurface = 'glass'
   const steel = new THREE.MeshStandardMaterial({ color: 0x96a7aa, metalness: 0.55, roughness: 0.5 })
   const wood = new THREE.MeshStandardMaterial({ color: 0x9b7958, roughness: 0.9 })
   const orange = new THREE.MeshStandardMaterial({ color: 0xdb7a3d, roughness: 0.7 })

@@ -8,6 +8,7 @@ export function createIslandCity(parent: THREE.Group) {
   const concrete = new THREE.MeshStandardMaterial({ color: 0xe5e5db, roughness: 0.75 })
   const white = new THREE.MeshStandardMaterial({ color: 0xf3f2e9, metalness: 0.18, roughness: 0.42, emissive: 0x357ab5 })
   const glass = new THREE.MeshStandardMaterial({ color: 0x275a72, metalness: 0.5, roughness: 0.24, emissive: 0x4ca6cc })
+  glass.userData.thermalSurface = 'glass'
   const asphalt = new THREE.MeshStandardMaterial({ color: 0x384550, roughness: 0.95 })
   const steel = new THREE.MeshStandardMaterial({ color: 0xa1b1bb, metalness: 0.5, roughness: 0.5 })
   const lit = new THREE.MeshBasicMaterial({ color: 0xffcf81, toneMapped: false })

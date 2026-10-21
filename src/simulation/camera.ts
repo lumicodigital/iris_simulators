@@ -1,5 +1,6 @@
 import type { Motion, Packet } from '../protocol/pelcoD'
 import { thermalPalettes } from './thermalPalettes'
+import { simulationClock } from './clock'
 
 export interface Pose { pan: number; tilt: number; zoom: number; focus: number; iris: number }
 export interface CameraState extends Pose {
@@ -74,7 +75,7 @@ export function applyPacket(camera: CameraState, packet: Packet, now = Date.now(
   const { action, preset } = command
   if (action === 'call') {
     if (preset === 251 || preset === 252) {
-      if (preset === 251 && !camera.gyroOn) camera.gyroStartedAt = performance.now() / 1000
+      if (preset === 251 && !camera.gyroOn) camera.gyroStartedAt = simulationClock.seconds
       camera.gyroOn = preset === 251; return 'Applied'
     }
     if (preset === 249 || preset === 250) { camera.gyroTrim = clamp(camera.gyroTrim + (preset === 250 ? 0.25 : -0.25), -10, 10); return 'Applied' }

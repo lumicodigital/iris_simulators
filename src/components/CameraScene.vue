@@ -13,6 +13,9 @@ import { compensateGyro } from '../scene/vesselMotion'
 import { createCameraEffects, type CameraEffectsSettings } from '../scene/cameraEffects'
 import { createSky, maritimeSunDirection, maritimeSunDirectionFor } from '../scene/sky'
 import { yachtPose } from '../simulation/maritime'
+import { simulationClock } from '../simulation/clock'
+import { thermalSettings } from '../simulation/thermal'
+import { paletteGradient } from '../simulation/thermalPalettes'
 
 const props = withDefaults(defineProps<{ camera: CameraState; showFrustum: boolean; compact?: boolean; videoOnly?: boolean; videoActive?: boolean; videoHighQuality?: boolean; environment?: SceneEnvironment; night?: boolean; timeOfDay?: TimeOfDay; waveStrength?: number; cameras?: SimulatedCamera[]; cameraId?: string }>(), { videoActive: true })
 const emit = defineEmits<{ videoFrame: [canvas: HTMLCanvasElement] }>()
@@ -118,7 +121,7 @@ onMounted(() => {
     harbourView = () => { followYacht = false; cutaway.value = false; view.position.set(550, 330, 260); controls.target.set(-120, 65, 820); controls.update() }
     resetView = () => {
       if (aboard) {
-        const pose = yachtPose(performance.now() / 1000)
+        const pose = yachtPose(simulationClock.seconds)
         observedYacht.set(pose.x, 0, pose.z); followYacht = true
         view.position.set(34, 24, 37).add(observedYacht); controls.target.set(0, 3.3, 0).add(observedYacht); cutaway.value = false
       }
@@ -143,7 +146,7 @@ onMounted(() => {
       parent.add(item); return item
     }
     const yacht = aboard ? createYacht(scene, props.videoHighQuality || (!props.compact && !props.videoOnly) ? 384 : 128) : undefined
-    yacht?.update(performance.now() / 1000, props.waveStrength ?? 1)
+    yacht?.update(simulationClock.seconds, props.waveStrength ?? 1)
     const heatSources: HeatSource[] = yacht ? yacht.heatSources : []
     let ground: THREE.Mesh | undefined
     if (!aboard) {
@@ -322,8 +325,8 @@ onMounted(() => {
         yacht?.setNight(night)
         sky?.setTimeOfDay(timeOfDay)
       }
-      sky?.update(now / 1000)
-      yacht?.update(now / 1000, props.waveStrength ?? 1)
+      sky?.update(simulationClock.seconds)
+      yacht?.update(simulationClock.seconds, props.waveStrength ?? 1)
       if (aboard) {
         followDelta.set(vessel.position.x, 0, vessel.position.z).sub(observedYacht)
         if (followYacht) { view.position.add(followDelta); controls.target.add(followDelta) }
@@ -356,7 +359,7 @@ onMounted(() => {
       }
       frustum.visible = props.showFrustum && props.camera.power
       const effects: CameraEffectsSettings = {
-        camera: props.camera, night, seconds: now / 1000, sunDirection,
+        camera: props.camera, night, seconds: simulationClock.seconds, sunDirection,
         seed: (props.cameras?.[cameraIndex.value]?.address ?? 1) * 13.37,
         palette: props.camera.thermalPalette, inverted: props.camera.thermalInverted,
       }
@@ -446,6 +449,7 @@ onUnmounted(() => {
       </div>
     </div>
     <div v-if="!videoOnly && !isPovFullscreen" class="scene-axis"><span class="axis-y">Y</span><span class="axis-z">Z</span><span class="axis-x">X</span></div>
+    <div v-if="!videoOnly && camera.thermalEnabled" class="thermal-legend" :class="{ expanded: isPovFullscreen }" aria-label="Simulated thermal temperature scale"><span>{{ thermalSettings.max }}°C</span><i :style="{ background: paletteGradient(camera.thermalPalette).replace('90deg', 'to top'), transform: camera.thermalInverted ? 'rotate(180deg)' : undefined }"></i><span>{{ thermalSettings.min }}°C</span><small>SIM °C</small></div>
     <div v-if="!videoOnly" class="lens-caption">{{ camera.thermalEnabled ? findPalette(camera.thermalPalette).name.toUpperCase() : 'CAMERA VIEW' }} <span>{{ camera.power ? `${camera.zoom.toFixed(1)}×` : 'OFFLINE' }}</span></div>
     <button v-if="!videoOnly && !error" ref="povFullscreenButton" type="button" class="icon-button scene-fullscreen-button pov-fullscreen-button" :aria-label="isPovFullscreen ? 'Exit POV fullscreen' : 'Fullscreen camera POV'" :title="isPovFullscreen ? 'Exit POV fullscreen (Esc)' : 'Fullscreen camera POV'" :aria-pressed="isPovFullscreen" @click.stop="toggleFullscreen('pov')" @pointerdown.stop>
       <svg v-if="!isPovFullscreen" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><path d="M8 3H3v5M16 3h5v5M3 16v5h5M21 16v5h-5" /></svg>
@@ -456,6 +460,8 @@ onUnmounted(() => {
 </template>
 
 <style scoped>
+.thermal-legend{position:absolute;right:27px;bottom:62px;z-index:2;padding:5px;background:#061019b8;border-radius:3px;display:flex;align-items:center;flex-direction:column;gap:3px;font:7px monospace;color:#e4efee;pointer-events:none}.thermal-legend i{display:block;width:7px;height:52px;border:1px solid #c5ddd244}.thermal-legend small{font-size:6px;color:#a2bbc3}.thermal-legend.expanded{right:24px;top:110px;bottom:auto;font-size:11px;padding:9px;gap:7px}.thermal-legend.expanded i{width:15px;height:190px}.thermal-legend.expanded small{font-size:9px}.scene-compact .thermal-legend:not(.expanded){right:15px;bottom:49px;padding:3px;font-size:6px}.scene-compact .thermal-legend:not(.expanded) i{height:30px}
+
 .scene-compact:not(.is-fullscreen) .scene-top{top:10px;left:10px;right:10px}
 .scene-compact:not(.is-fullscreen) .scene-caption,.scene-compact:not(.is-fullscreen) .scene-hint,.scene-compact:not(.is-fullscreen) .scene-axis{display:none}
 .scene-compact:not(.is-fullscreen) .lens-caption{right:10px;bottom:calc(var(--lens-height,60px) + 14px);font-size:7px;letter-spacing:0}

@@ -31,6 +31,8 @@ export class NvrStream {
   private buffer: number[] = []
   private lastByteAt = 0
   get pending() { return [...this.buffer] }
+  snapshot() { return { buffer: [...this.buffer], lastByteAt: this.lastByteAt } }
+  restore(state: { buffer: number[]; lastByteAt: number }) { this.buffer = [...state.buffer]; this.lastByteAt = state.lastByteAt }
   push(bytes: number[], now = Date.now()): StreamEvent[] {
     const events = this.expire(now)
     this.buffer.push(...bytes); this.lastByteAt = now

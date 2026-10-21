@@ -71,6 +71,8 @@ export class SharedSerialBus {
   private stream = new PelcoDStream()
   private source = ''
   get pending() { return this.stream.pending }
+  snapshot() { return { ...this.stream.snapshot(), source: this.source } }
+  restore(state: { buffer: number[]; lastByteAt: number; source: string }) { this.stream.restore(state); this.source = state.source }
   receive(bytes: number[], source: string, complete = false, now = Date.now()): BusStreamEvent[] {
     const events: BusStreamEvent[] = this.expire(now)
     if (this.stream.pending.length && this.source && this.source !== source) {

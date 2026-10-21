@@ -61,3 +61,7 @@
 
 .daylight-picker kbd{margin-left:5px;padding:1px 4px;border:1px solid #4a5c66;border-radius:3px;font:8px var(--mono);color:#9cb4c0}.daylight-picker button.active kbd{border-color:#588873;color:#c3f0d9}
 @media(max-width:1480px){.environment-note{display:none}}
+
+.thermal-controls{display:flex;align-items:flex-end;gap:14px;flex-wrap:wrap;padding:14px 20px;border-top:1px solid var(--line);background:#12252b}.thermal-controls label{font-size:10px;color:#91b2bd;display:flex;flex-direction:column;gap:6px}.thermal-controls input{width:76px}.thermal-controls input,.thermal-controls select{font-size:11px;padding:7px 9px}.thermal-controls select{max-width:230px}
+
+.is-replaying .environment-toolbar,.is-replaying .nvr-controls,.is-replaying .camera-controls,.is-replaying .camera-effects,.is-replaying .thermal-controls,.is-replaying .focus-controls,.is-replaying .settings-panel,.is-replaying .input-panel{opacity:.55}

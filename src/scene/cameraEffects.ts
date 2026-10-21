@@ -28,7 +28,7 @@ export function cameraEffectsParameters(camera: CameraEffectsSettings['camera'],
 
 // One sensor pass per feed. Thermal blur/noise/bloom happen on heat before palette lookup.
 export function createCameraEffects(thermal = false) {
-  const target = new THREE.WebGLRenderTarget(1, 1, { type: thermal ? THREE.UnsignedByteType : THREE.HalfFloatType, depthBuffer: true })
+  const target = new THREE.WebGLRenderTarget(1, 1, { type: THREE.HalfFloatType, depthBuffer: true })
   target.depthTexture = new THREE.DepthTexture(1, 1, THREE.UnsignedIntType)
   const pixels = palettePixels('white-hot')
   const palette = new THREE.DataTexture(pixels, 256, 1, THREE.RGBAFormat)

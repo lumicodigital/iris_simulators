@@ -125,6 +125,8 @@ export class PelcoDStream {
   private buffer: number[] = []
   private lastByteAt = 0
   get pending(): number[] { return [...this.buffer] }
+  snapshot() { return { buffer: [...this.buffer], lastByteAt: this.lastByteAt } }
+  restore(state: { buffer: number[]; lastByteAt: number }) { this.buffer = [...state.buffer]; this.lastByteAt = state.lastByteAt }
   push(bytes: readonly number[], now = Date.now()): StreamEvent[] {
     const events = this.expire(now)
     this.buffer.push(...bytes)

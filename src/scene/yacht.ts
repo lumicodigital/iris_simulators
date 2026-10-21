@@ -17,12 +17,15 @@ export function createYacht(scene: THREE.Scene, reflectionSize = 256) {
   const hullPaint = new THREE.MeshStandardMaterial({ color: 0xe4eaf0, metalness: 0.28, roughness: 0.3, side: THREE.DoubleSide })
   const navy = new THREE.MeshStandardMaterial({ color: 0x122d40, roughness: 0.27, metalness: 0.4 })
   const glass = new THREE.MeshStandardMaterial({ color: 0x174453, metalness: 0.6, roughness: 0.13 })
+  glass.userData.thermalSurface = 'glass'
   glass.emissive.set(0xffcd8c)
   const teak = new THREE.MeshStandardMaterial({ color: 0xb68c60, roughness: 0.84 })
   const silver = new THREE.MeshStandardMaterial({ color: 0xc0cdd2, metalness: 0.85, roughness: 0.24 })
   const upholstery = new THREE.MeshStandardMaterial({ color: 0xe2d7bd, roughness: 0.95 })
   const machinery = new THREE.MeshStandardMaterial({ color: 0x356776, roughness: 0.55, metalness: 0.5 })
   const hotMetal = new THREE.MeshStandardMaterial({ color: 0x83969c, roughness: 0.55, metalness: 0.5 })
+  hotMetal.userData.thermalEmissivity = 0.82 // Oxidized machinery, rather than polished bare metal.
+  machinery.userData.thermalEmissivity = 0.92
   const pipeRed = new THREE.MeshStandardMaterial({ color: 0xab5944, roughness: 0.5, metalness: 0.35 })
   const pipeBlue = new THREE.MeshStandardMaterial({ color: 0x3c8394, roughness: 0.5, metalness: 0.4 })
   function mesh(geometry: THREE.BufferGeometry, material: THREE.Material, x: number, y: number, z: number, parent: THREE.Object3D = exterior, heat = 0.26) {

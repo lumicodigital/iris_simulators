@@ -25,6 +25,7 @@ export function createMaritimeWorld(scene: THREE.Scene) {
   const rust = new THREE.MeshStandardMaterial({ color: 0x80492f, metalness: 0.2, roughness: 0.95 })
   const steel = new THREE.MeshStandardMaterial({ color: 0x596c71, metalness: 0.65, roughness: 0.5 })
   const glass = new THREE.MeshStandardMaterial({ color: 0x174452, roughness: 0.28, emissive: 0xffc77c, emissiveIntensity: 0 })
+  glass.userData.thermalSurface = 'glass'
   const timber = new THREE.MeshStandardMaterial({ color: 0x7f6a4c, roughness: 0.95 })
   const glows = new THREE.Group(); glows.name = 'Navigation lights'; glows.visible = false; world.add(glows)
   const floating: { object: THREE.Group; y: number }[] = []
